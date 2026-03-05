@@ -1,0 +1,71 @@
+simulation:
+  start_date: "2026-01-05"
+  seed: 42
+  country: "PL"
+
+company:
+  daily_production_range: [200, 800]
+  production_stoppage_probability: 0.025
+  production_lines: 5
+  warehouse_transfer_threshold: 0.3
+
+customers:
+  count: 60
+  churn_rate_monthly: 0.01
+  new_customer_rate_monthly: 0.02
+  currency_distribution:
+    PLN: 0.65
+    EUR: 0.30
+    USD: 0.05
+
+demand:
+  base_monthly_multipliers:
+    1: 0.70
+    2: 0.85
+    3: 1.15
+    4: 1.25
+    5: 1.05
+    6: 1.00
+    7: 0.75
+    8: 0.80
+    9: 1.15
+    10: 1.10
+    11: 1.15
+    12: 0.55
+  signal_probability_daily: 0.05
+
+orders:
+  modification_probability: 0.10
+  cancellation_probability: 0.025
+  express_share: 0.12
+  critical_share: 0.03
+  backorder_escalation_days: 14
+  backorder_cancel_probability_after_30d: 0.15
+
+loads:
+  exception_probability: 0.08
+  consolidation_window_days: 3
+  return_probability: 0.015
+  pod_delay_days: [1, 3]
+
+payments:
+  on_time_probability: 0.82
+  late_probability: 0.15
+  very_late_probability: 0.03
+
+exchange_rates:
+  base:
+    EUR_PLN: 4.30
+    USD_PLN: 4.05
+  daily_volatility: 0.003
+
+schema_evolution:
+  sales_channel_from_day: 60
+  incoterms_from_day: 120
+  forecast_model_upgrade_day: 90
+
+noise:
+  profile: "medium"
+
+disruptions:
+  enabled: false

@@ -1,0 +1,501 @@
+"""SimulationState: central state object + SQLite persistence.
+
+All mutable simulation state lives here and is persisted to SQLite after
+every simulated day.  This makes the simulation fully resumable and, because
+all randomness flows through ``state.rng``, fully reproducible from a given
+seed.
+
+DB location: ``state/simulation.db`` (relative to CWD, or configured via
+``config``).  The ``state/`` directory is created automatically if absent.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import pickle
+import random
+import sqlite3
+from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+from flowform.catalog.generator import CatalogEntry, generate_catalog
+from flowform.config import Config
+from flowform.master_data.carriers import ALL_CARRIERS, Carrier
+from flowform.master_data.customers import Customer, generate_customers
+from flowform.master_data.warehouses import ALL_WAREHOUSES, Warehouse
+
+# ---------------------------------------------------------------------------
+# Default DB path
+# ---------------------------------------------------------------------------
+
+_DEFAULT_DB_PATH = Path("state/simulation.db")
+
+# ---------------------------------------------------------------------------
+# JSON serialisation helpers for dataclasses
+# ---------------------------------------------------------------------------
+
+
+def _customer_to_dict(c: Customer) -> dict[str, Any]:
+    """Serialise a Customer to a JSON-safe dict."""
+    d = dataclasses.asdict(c)
+    # date → ISO string
+    d["onboarding_date"] = c.onboarding_date.isoformat()
+    # seasonal_profile keys are ints; JSON requires string keys
+    d["seasonal_profile"] = {str(k): v for k, v in c.seasonal_profile.items()}
+    # ordering_profile sku_affinity dn keys are ints too
+    sku_affinity = {}
+    for dim, weights in c.ordering_profile.sku_affinity.items():
+        sku_affinity[dim] = {str(k): v for k, v in weights.items()}
+    d["ordering_profile"]["sku_affinity"] = sku_affinity
+    return d
+
+
+def _customer_from_dict(d: dict[str, Any]) -> Customer:
+    """Deserialise a Customer from the dict produced by ``_customer_to_dict``."""
+    from flowform.master_data.customers import CustomerAddress, OrderingProfile
+
+    primary = CustomerAddress(**d["primary_address"])
+    secondary = CustomerAddress(**d["secondary_address"]) if d["secondary_address"] else None
+
+    # Restore int keys in seasonal_profile and dn weights inside sku_affinity
+    seasonal_profile = {int(k): v for k, v in d["seasonal_profile"].items()}
+
+    raw_affinity = d["ordering_profile"]["sku_affinity"]
+    sku_affinity: dict[str, dict[str | int, float]] = {}
+    for dim, weights in raw_affinity.items():
+        if dim == "dn":
+            sku_affinity[dim] = {int(k): v for k, v in weights.items()}
+        else:
+            sku_affinity[dim] = {k: v for k, v in weights.items()}
+
+    ordering_profile = OrderingProfile(
+        base_order_frequency_per_month=d["ordering_profile"]["base_order_frequency_per_month"],
+        order_size_range=tuple(d["ordering_profile"]["order_size_range"]),  # type: ignore[arg-type]
+        sku_affinity=sku_affinity,
+    )
+
+    return Customer(
+        customer_id=d["customer_id"],
+        company_name=d["company_name"],
+        segment=d["segment"],
+        country_code=d["country_code"],
+        region=d["region"],
+        primary_address=primary,
+        secondary_address=secondary,
+        credit_limit=d["credit_limit"],
+        payment_terms_days=d["payment_terms_days"],
+        currency=d["currency"],
+        preferred_carrier=d["preferred_carrier"],
+        contract_discount_pct=d["contract_discount_pct"],
+        ordering_profile=ordering_profile,
+        seasonal_profile=seasonal_profile,
+        shutdown_months=d["shutdown_months"],
+        accepts_deliveries_december=d["accepts_deliveries_december"],
+        active=d["active"],
+        onboarding_date=date.fromisoformat(d["onboarding_date"]),
+    )
+
+
+def _carrier_to_dict(c: Carrier) -> dict[str, Any]:
+    return dataclasses.asdict(c)
+
+
+def _carrier_from_dict(d: dict[str, Any]) -> Carrier:
+    return Carrier(**d)
+
+
+def _warehouse_to_dict(w: Warehouse) -> dict[str, Any]:
+    return dataclasses.asdict(w)
+
+
+def _warehouse_from_dict(d: dict[str, Any]) -> Warehouse:
+    from flowform.master_data.warehouses import Warehouse as W
+    return W(**d)
+
+
+# ---------------------------------------------------------------------------
+# SimulationState
+# ---------------------------------------------------------------------------
+
+
+class SimulationState:
+    """Central state object for the FlowForm supply chain simulation.
+
+    Do **not** instantiate directly.  Use :meth:`from_new` or :meth:`from_db`.
+    """
+
+    # ------------------------------------------------------------------
+    # Internal constructor
+    # ------------------------------------------------------------------
+
+    def __init__(
+        self,
+        *,
+        db_path: Path,
+        sim_day: int,
+        current_date: date,
+        start_date: date,
+        rng: random.Random,
+        catalog: list[CatalogEntry],
+        customers: list[Customer],
+        carriers: list[Carrier],
+        warehouses: list[Warehouse],
+        inventory: dict[str, dict[str, int]],
+        allocated: dict[str, dict[str, int]],
+        open_orders: dict[str, dict[str, Any]],
+        customer_balances: dict[str, float],
+        backorder_queue: list[dict[str, Any]],
+        active_loads: dict[str, dict[str, Any]],
+        in_transit_returns: list[dict[str, Any]],
+        exchange_rates: dict[str, float],
+        schema_flags: dict[str, bool],
+    ) -> None:
+        self._db_path = db_path
+        self.sim_day = sim_day
+        self.current_date = current_date
+        self.start_date = start_date
+        self.rng = rng
+        self.catalog = catalog
+        self.customers = customers
+        self.carriers = carriers
+        self.warehouses = warehouses
+        self.inventory = inventory
+        self.allocated = allocated
+        self.open_orders = open_orders
+        self.customer_balances = customer_balances
+        self.backorder_queue = backorder_queue
+        self.active_loads = active_loads
+        self.in_transit_returns = in_transit_returns
+        self.exchange_rates = exchange_rates
+        self.schema_flags = schema_flags
+
+    # ------------------------------------------------------------------
+    # Public class methods
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_new(cls, config: Config, db_path: Path | None = None) -> "SimulationState":
+        """Create a fresh simulation state.
+
+        Generates all master data, initialises operational tables to zero /
+        empty, and persists everything to SQLite.  Called on ``--reset``.
+
+        Args:
+            config:  Validated simulation config.
+            db_path: Override the SQLite DB path (used in tests).  Defaults to
+                     ``state/simulation.db``.
+        """
+        resolved_db = db_path or _DEFAULT_DB_PATH
+        resolved_db.parent.mkdir(parents=True, exist_ok=True)
+
+        rng = random.Random(config.simulation.seed)
+
+        # Generate master data
+        catalog = generate_catalog(rng)
+        customers = generate_customers(rng, config)
+        carriers = list(ALL_CARRIERS)
+        warehouses = list(ALL_WAREHOUSES)
+
+        # Initialise operational tables
+        inventory: dict[str, dict[str, int]] = {w.code: {} for w in warehouses}
+        allocated: dict[str, dict[str, int]] = {w.code: {} for w in warehouses}
+        open_orders: dict[str, dict[str, Any]] = {}
+        customer_balances: dict[str, float] = {c.customer_id: 0.0 for c in customers}
+        backorder_queue: list[dict[str, Any]] = []
+        active_loads: dict[str, dict[str, Any]] = {}
+        in_transit_returns: list[dict[str, Any]] = []
+        exchange_rates: dict[str, float] = {"EUR": 4.30, "USD": 4.05}
+        schema_flags: dict[str, bool] = {"sales_channel": False, "incoterms": False}
+
+        state = cls(
+            db_path=resolved_db,
+            sim_day=0,
+            current_date=config.simulation.start_date,
+            start_date=config.simulation.start_date,
+            rng=rng,
+            catalog=catalog,
+            customers=customers,
+            carriers=carriers,
+            warehouses=warehouses,
+            inventory=inventory,
+            allocated=allocated,
+            open_orders=open_orders,
+            customer_balances=customer_balances,
+            backorder_queue=backorder_queue,
+            active_loads=active_loads,
+            in_transit_returns=in_transit_returns,
+            exchange_rates=exchange_rates,
+            schema_flags=schema_flags,
+        )
+        state.save()
+        return state
+
+    @classmethod
+    def from_db(cls, config: Config, db_path: Path | None = None) -> "SimulationState":
+        """Resume an existing simulation from SQLite.
+
+        Args:
+            config:  Validated simulation config (used only for type info; the
+                     actual state values are loaded from the DB).
+            db_path: Override the SQLite DB path (used in tests).
+
+        Raises:
+            FileNotFoundError: If the DB file does not exist.
+        """
+        resolved_db = db_path or _DEFAULT_DB_PATH
+        if not resolved_db.exists():
+            raise FileNotFoundError(
+                f"Simulation DB not found at {resolved_db}. Run --reset first."
+            )
+
+        conn = sqlite3.connect(resolved_db)
+        try:
+            return cls._load_from_conn(conn, resolved_db)
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def save(self) -> None:
+        """Persist all mutable state to SQLite.
+
+        Called at the end of every simulated day.  The DB is created (or
+        overwritten) at ``self._db_path``.
+        """
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self._db_path)
+        try:
+            self._create_schema(conn)
+            self._write_meta(conn)
+            self._write_master_data(conn)
+            self._write_operational(conn)
+            conn.commit()
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # State mutation helpers
+    # ------------------------------------------------------------------
+
+    def advance_day(self, new_date: date) -> None:
+        """Increment ``sim_day`` and update ``current_date``.
+
+        Args:
+            new_date: The new simulated calendar date (must be strictly after
+                      ``current_date``).
+        """
+        self.sim_day += 1
+        self.current_date = new_date
+
+    # ------------------------------------------------------------------
+    # Internal: schema creation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _create_schema(conn: sqlite3.Connection) -> None:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS sim_meta (
+                id              INTEGER PRIMARY KEY CHECK (id = 1),
+                sim_day         INTEGER NOT NULL,
+                sim_current_date TEXT NOT NULL,
+                sim_start_date  TEXT NOT NULL,
+                rng_state       BLOB NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS catalog_skus (
+                sku         TEXT PRIMARY KEY,
+                weight_kg   REAL NOT NULL,
+                spec_json   TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS customers_json (
+                customer_id TEXT PRIMARY KEY,
+                data        TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS carriers_json (
+                code TEXT PRIMARY KEY,
+                data TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS warehouses_json (
+                code TEXT PRIMARY KEY,
+                data TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS kv_state (
+                key  TEXT PRIMARY KEY,
+                data TEXT NOT NULL
+            );
+        """)
+
+    # ------------------------------------------------------------------
+    # Internal: write helpers
+    # ------------------------------------------------------------------
+
+    def _write_meta(self, conn: sqlite3.Connection) -> None:
+        rng_blob = pickle.dumps(self.rng.getstate())
+        conn.execute(
+            """
+            INSERT INTO sim_meta (id, sim_day, sim_current_date, sim_start_date, rng_state)
+            VALUES (1, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                sim_day          = excluded.sim_day,
+                sim_current_date = excluded.sim_current_date,
+                sim_start_date   = excluded.sim_start_date,
+                rng_state        = excluded.rng_state
+            """,
+            (
+                self.sim_day,
+                self.current_date.isoformat(),
+                self.start_date.isoformat(),
+                rng_blob,
+            ),
+        )
+
+    def _write_master_data(self, conn: sqlite3.Connection) -> None:
+        # Catalog SKUs
+        conn.execute("DELETE FROM catalog_skus")
+        for entry in self.catalog:
+            spec_dict = {
+                "valve_type": entry.spec.valve_type,
+                "dn": entry.spec.dn,
+                "material": entry.spec.material,
+                "pressure_class": entry.spec.pressure_class,
+                "connection": entry.spec.connection,
+                "actuation": entry.spec.actuation,
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO catalog_skus (sku, weight_kg, spec_json) VALUES (?, ?, ?)",
+                (entry.sku, entry.weight_kg, json.dumps(spec_dict)),
+            )
+
+        # Customers
+        conn.execute("DELETE FROM customers_json")
+        for customer in self.customers:
+            conn.execute(
+                "INSERT INTO customers_json (customer_id, data) VALUES (?, ?)",
+                (customer.customer_id, json.dumps(_customer_to_dict(customer))),
+            )
+
+        # Carriers
+        conn.execute("DELETE FROM carriers_json")
+        for carrier in self.carriers:
+            conn.execute(
+                "INSERT INTO carriers_json (code, data) VALUES (?, ?)",
+                (carrier.code, json.dumps(_carrier_to_dict(carrier))),
+            )
+
+        # Warehouses
+        conn.execute("DELETE FROM warehouses_json")
+        for warehouse in self.warehouses:
+            conn.execute(
+                "INSERT INTO warehouses_json (code, data) VALUES (?, ?)",
+                (warehouse.code, json.dumps(_warehouse_to_dict(warehouse))),
+            )
+
+    def _write_operational(self, conn: sqlite3.Connection) -> None:
+        ops: dict[str, Any] = {
+            "inventory": self.inventory,
+            "allocated": self.allocated,
+            "open_orders": self.open_orders,
+            "customer_balances": self.customer_balances,
+            "backorder_queue": self.backorder_queue,
+            "active_loads": self.active_loads,
+            "in_transit_returns": self.in_transit_returns,
+            "exchange_rates": self.exchange_rates,
+            "schema_flags": self.schema_flags,
+        }
+        for key, value in ops.items():
+            conn.execute(
+                "INSERT INTO kv_state (key, data) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET data = excluded.data",
+                (key, json.dumps(value)),
+            )
+
+    # ------------------------------------------------------------------
+    # Internal: load from connection
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _load_from_conn(cls, conn: sqlite3.Connection, db_path: Path) -> "SimulationState":
+        # Meta
+        row = conn.execute(
+            "SELECT sim_day, sim_current_date, sim_start_date, rng_state FROM sim_meta WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("sim_meta table is empty — DB may be corrupt.")
+
+        sim_day = row[0]
+        current_date = date.fromisoformat(row[1])
+        start_date = date.fromisoformat(row[2])
+        rng = random.Random()
+        rng.setstate(pickle.loads(row[3]))  # noqa: S301 — internal use only
+
+        # Catalog
+        catalog: list[CatalogEntry] = []
+        from flowform.catalog.constraints import SKUSpec
+        for sku_row in conn.execute("SELECT sku, weight_kg, spec_json FROM catalog_skus"):
+            sku, weight_kg, spec_json = sku_row
+            spec_dict = json.loads(spec_json)
+            spec = SKUSpec(**spec_dict)
+            catalog.append(CatalogEntry(spec=spec, sku=sku, weight_kg=weight_kg))
+
+        # Customers
+        customers: list[Customer] = []
+        for cust_row in conn.execute("SELECT data FROM customers_json"):
+            customers.append(_customer_from_dict(json.loads(cust_row[0])))
+
+        # Carriers
+        carriers: list[Carrier] = []
+        for carrier_row in conn.execute("SELECT data FROM carriers_json"):
+            carriers.append(_carrier_from_dict(json.loads(carrier_row[0])))
+
+        # Warehouses
+        warehouses: list[Warehouse] = []
+        for wh_row in conn.execute("SELECT data FROM warehouses_json"):
+            warehouses.append(_warehouse_from_dict(json.loads(wh_row[0])))
+
+        # Operational tables
+        def _kv(key: str) -> Any:
+            row = conn.execute(
+                "SELECT data FROM kv_state WHERE key = ?", (key,)
+            ).fetchone()
+            if row is None:
+                return None
+            return json.loads(row[0])
+
+        inventory: dict[str, dict[str, int]] = _kv("inventory") or {}
+        allocated: dict[str, dict[str, int]] = _kv("allocated") or {}
+        open_orders: dict[str, dict[str, Any]] = _kv("open_orders") or {}
+        customer_balances: dict[str, float] = _kv("customer_balances") or {}
+        backorder_queue: list[dict[str, Any]] = _kv("backorder_queue") or []
+        active_loads: dict[str, dict[str, Any]] = _kv("active_loads") or {}
+        in_transit_returns: list[dict[str, Any]] = _kv("in_transit_returns") or []
+        exchange_rates: dict[str, float] = _kv("exchange_rates") or {"EUR": 4.30, "USD": 4.05}
+        schema_flags: dict[str, bool] = _kv("schema_flags") or {"sales_channel": False, "incoterms": False}
+
+        return cls(
+            db_path=db_path,
+            sim_day=sim_day,
+            current_date=current_date,
+            start_date=start_date,
+            rng=rng,
+            catalog=catalog,
+            customers=customers,
+            carriers=carriers,
+            warehouses=warehouses,
+            inventory=inventory,
+            allocated=allocated,
+            open_orders=open_orders,
+            customer_balances=customer_balances,
+            backorder_queue=backorder_queue,
+            active_loads=active_loads,
+            in_transit_returns=in_transit_returns,
+            exchange_rates=exchange_rates,
+            schema_flags=schema_flags,
+        )
