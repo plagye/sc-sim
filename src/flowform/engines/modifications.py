@@ -19,6 +19,8 @@ from pydantic import BaseModel
 
 from flowform.calendar import is_business_day
 from flowform.config import Config
+from flowform.engines._order_utils import update_order_status
+from flowform.engines.inventory_movements import InventoryMovementEvent, _make_event
 from flowform.state import SimulationState
 
 # ---------------------------------------------------------------------------
@@ -139,12 +141,21 @@ def _warehouse_for_line(line: dict[str, Any]) -> str:
 def _return_allocated_to_inventory(
     state: SimulationState,
     line: dict[str, Any],
+    sim_date: date,
+    order_id: str,
+    unpick_events: list[InventoryMovementEvent],
 ) -> None:
     """Add a line's allocated quantity back to warehouse inventory.
 
+    Also emits an ``InventoryMovementEvent`` with ``movement_type="unpick"``
+    so the ERP inventory_movements file records the reversal.
+
     Args:
-        state: Mutable simulation state (inventory mutated in place).
-        line:  Line dict whose allocated qty should be returned.
+        state:         Mutable simulation state (inventory mutated in place).
+        line:          Line dict whose allocated qty should be returned.
+        sim_date:      Current simulation date (for the movement event).
+        order_id:      Parent order ID (for the movement event reference).
+        unpick_events: Accumulator list — the new unpick event is appended here.
     """
     allocated = line.get("quantity_allocated", 0)
     if allocated <= 0:
@@ -154,27 +165,27 @@ def _return_allocated_to_inventory(
     wh_inv = state.inventory.setdefault(warehouse_id, {})
     wh_inv[sku] = wh_inv.get(sku, 0) + allocated
 
+    unpick_events.append(
+        _make_event(
+            state,
+            sim_date,
+            movement_type="unpick",
+            warehouse_id=warehouse_id,
+            sku=sku,
+            quantity=allocated,
+            quantity_direction="in",
+            order_id=order_id,
+            order_line_id=line.get("line_id"),
+        )
+    )
+
 
 def _update_order_status(order: dict[str, Any]) -> None:
     """Recalculate order-level status from its lines.
 
-    Mirrors the logic in the allocation engine so state stays consistent.
+    Delegates to the shared utility so both engines stay in sync.
     """
-    lines = order.get("lines", [])
-    if not lines:
-        return
-
-    statuses = {line.get("line_status", "open") for line in lines}
-
-    if statuses == {"cancelled"}:
-        order["status"] = "cancelled"
-    elif statuses == {"allocated"}:
-        order["status"] = "allocated"
-    elif statuses <= {"allocated", "cancelled"}:
-        order["status"] = "allocated"
-    elif "backordered" in statuses or "partially_allocated" in statuses:
-        order["status"] = "partially_allocated"
-    # otherwise leave status unchanged (still "confirmed", etc.)
+    update_order_status(order)
 
 
 def _pick_customer_sku(
@@ -220,6 +231,7 @@ def _apply_quantity_change(
     state: SimulationState,
     order: dict[str, Any],
     sim_date: date,
+    unpick_events: list[InventoryMovementEvent],
 ) -> OrderModificationEvent | None:
     """Change the quantity on a random non-shipped, non-cancelled line.
 
@@ -227,6 +239,13 @@ def _apply_quantity_change(
     - New qty = old qty * uniform(0.7, 1.5), rounded, min 1.
     - Cannot reduce below quantity_allocated + quantity_shipped.
     - If qty increased, the surplus goes to backordered.
+    - If allocated qty is reduced, an unpick movement event is emitted.
+
+    Args:
+        state:         Mutable simulation state.
+        order:         Order dict (mutated in place).
+        sim_date:      Current simulation date.
+        unpick_events: Accumulator for unpick movement events.
     """
     candidates = [
         line for line in order.get("lines", [])
@@ -254,6 +273,7 @@ def _apply_quantity_change(
 
     # Adjust line fields
     line["quantity_ordered"] = new_qty
+    order_id: str = order.get("order_id", "")
 
     if new_qty > old_qty:
         # Increase: extra goes to backorder
@@ -277,10 +297,25 @@ def _apply_quantity_change(
             wh_inv = state.inventory.setdefault(_warehouse_return, {})
             wh_inv[sku] = wh_inv.get(sku, 0) + alloc_reduction
 
+            if alloc_reduction > 0:
+                unpick_events.append(
+                    _make_event(
+                        state,
+                        sim_date,
+                        movement_type="unpick",
+                        warehouse_id=_warehouse_return,
+                        sku=sku,
+                        quantity=alloc_reduction,
+                        quantity_direction="in",
+                        order_id=order_id,
+                        order_line_id=line.get("line_id"),
+                    )
+                )
+
     return OrderModificationEvent(
         event_id=str(uuid.uuid4()),
         modification_date=sim_date.isoformat(),
-        order_id=order["order_id"],
+        order_id=order_id,
         modification_type="quantity_change",
         line_id=line["line_id"],
         old_value=str(old_qty),
@@ -389,10 +424,18 @@ def _apply_line_removal(
     state: SimulationState,
     order: dict[str, Any],
     sim_date: date,
+    unpick_events: list[InventoryMovementEvent],
 ) -> OrderModificationEvent | None:
     """Remove the line with the smallest quantity_ordered (only if >1 active line).
 
-    Returns allocated inventory for the removed line to warehouse stock.
+    Returns allocated inventory for the removed line to warehouse stock and
+    emits an unpick movement event.
+
+    Args:
+        state:         Mutable simulation state.
+        order:         Order dict (mutated in place).
+        sim_date:      Current simulation date.
+        unpick_events: Accumulator for unpick movement events.
     """
     active = _active_lines(order)
     if len(active) <= 1:
@@ -401,8 +444,9 @@ def _apply_line_removal(
     # Pick the line with the smallest quantity_ordered
     target = min(active, key=lambda ln: ln.get("quantity_ordered", 0))
 
-    # Return allocated qty to inventory
-    _return_allocated_to_inventory(state, target)
+    # Return allocated qty to inventory (and emit unpick event)
+    order_id: str = order.get("order_id", "")
+    _return_allocated_to_inventory(state, target, sim_date, order_id, unpick_events)
 
     # Cancel the line
     old_qty = target.get("quantity_ordered", 0)
@@ -416,7 +460,7 @@ def _apply_line_removal(
     return OrderModificationEvent(
         event_id=str(uuid.uuid4()),
         modification_date=sim_date.isoformat(),
-        order_id=order["order_id"],
+        order_id=order_id,
         modification_type="line_removal",
         line_id=target.get("line_id"),
         old_value=str(old_qty),
@@ -444,14 +488,27 @@ def _apply_line_addition(
     line_num = len(existing_lines) + 1
     line_id = f"{order['order_id']}-L{line_num}"
 
-    # Find a unit_price for this SKU from the catalog
+    # Find a unit_price for this SKU from the catalog, applying discount + conversion
     from flowform.catalog import pricing as _pricing
+    from flowform.engines.orders import _make_rates_dict
+
+    # Look up customer for discount + currency
+    customer = None
+    for c in state.customers:
+        if c.customer_id == customer_id:
+            customer = c
+            break
+
+    discount_pct: float = customer.contract_discount_pct if customer is not None else 0.0
+    currency: str = customer.currency if customer is not None else order.get("currency", "PLN")
+    rates = _make_rates_dict(state)
 
     unit_price = 0.0
     for entry in state.catalog:
         if entry.sku == sku:
             pln_price = _pricing.base_price_pln(entry.spec)
-            unit_price = pln_price
+            discounted = _pricing.apply_customer_discount(pln_price, discount_pct)
+            unit_price = _pricing.convert_price(discounted, currency, rates)
             break
 
     new_line: dict[str, Any] = {
@@ -489,13 +546,21 @@ def _apply_cancellation(
     order: dict[str, Any],
     order_id: str,
     sim_date: date,
+    unpick_events: list[InventoryMovementEvent],
 ) -> OrderCancellationEvent:
     """Cancel an order (fully or partially).
 
     Multi-line orders: 60% full cancel, 40% partial (cancel 1 to half the lines).
     Single-line orders: always full cancel.
 
-    Returns allocated inventory for every cancelled line.
+    Returns allocated inventory for every cancelled line and emits unpick events.
+
+    Args:
+        state:         Mutable simulation state.
+        order:         Order dict (mutated in place).
+        order_id:      ID of the order being cancelled.
+        sim_date:      Current simulation date.
+        unpick_events: Accumulator for unpick movement events.
     """
     active = _active_lines(order)
     n_active = len(active)
@@ -517,8 +582,8 @@ def _apply_cancellation(
     total_qty_cancelled = 0
 
     for line in lines_to_cancel:
-        # Return allocated stock
-        _return_allocated_to_inventory(state, line)
+        # Return allocated stock (and emit unpick event)
+        _return_allocated_to_inventory(state, line, sim_date, order_id, unpick_events)
 
         qty_remaining = (
             line.get("quantity_ordered", 0) - line.get("quantity_shipped", 0)
@@ -553,7 +618,7 @@ def run(
     state: SimulationState,
     config: Config,
     sim_date: date,
-) -> list[OrderModificationEvent | OrderCancellationEvent]:
+) -> list[OrderModificationEvent | OrderCancellationEvent | InventoryMovementEvent]:
     """Run the modification and cancellation engine for *sim_date*.
 
     Step 1: Business day guard — returns [] on weekends and Polish holidays.
@@ -565,6 +630,10 @@ def run(
     ``state.open_orders`` and ``state.inventory`` are mutated in place.
     The caller is responsible for persisting state after the day loop.
 
+    Returns unpick :class:`InventoryMovementEvent` instances alongside the
+    modification and cancellation events so the ERP inventory_movements file
+    is consistent with order state.
+
     Args:
         state:    Mutable simulation state.
         config:   Validated simulation config (kept for contract consistency;
@@ -572,13 +641,15 @@ def run(
         sim_date: Current simulation date.
 
     Returns:
-        List of :class:`OrderModificationEvent` and
-        :class:`OrderCancellationEvent` (may be empty).
+        List of :class:`OrderModificationEvent`,
+        :class:`OrderCancellationEvent`, and :class:`InventoryMovementEvent`
+        (``movement_type="unpick"``); may be empty.
     """
     if not is_business_day(sim_date):
         return []
 
-    events: list[OrderModificationEvent | OrderCancellationEvent] = []
+    events: list[OrderModificationEvent | OrderCancellationEvent | InventoryMovementEvent] = []
+    unpick_events: list[InventoryMovementEvent] = []
     modified_order_ids: set[str] = set()
 
     # --- Pass 1: Modifications ---
@@ -598,13 +669,13 @@ def run(
         event: OrderModificationEvent | None = None
 
         if mod_type == "quantity_change":
-            event = _apply_quantity_change(state, order, sim_date)
+            event = _apply_quantity_change(state, order, sim_date, unpick_events)
         elif mod_type == "date_change":
             event = _apply_date_change(state, order, sim_date)
         elif mod_type == "priority_change":
             event = _apply_priority_change(state, order, sim_date)
         elif mod_type == "line_removal":
-            event = _apply_line_removal(state, order, sim_date)
+            event = _apply_line_removal(state, order, sim_date, unpick_events)
         elif mod_type == "line_addition":
             event = _apply_line_addition(state, order, sim_date)
 
@@ -624,7 +695,10 @@ def run(
         if state.rng.random() >= _CANCELLATION_PROB:
             continue
 
-        canc_event = _apply_cancellation(state, order, order_id, sim_date)
+        canc_event = _apply_cancellation(state, order, order_id, sim_date, unpick_events)
         events.append(canc_event)
+
+    # Append all unpick movement events at the end
+    events.extend(unpick_events)
 
     return events

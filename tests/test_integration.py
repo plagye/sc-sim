@@ -284,22 +284,29 @@ class TestDaysAdvancement:
         status = _run(["--status"], tmp_path)
         assert _extract_sim_day(status.stdout) == 5
 
-    def test_days_skips_weekends(self, tmp_path: Path) -> None:
-        """After ``--reset`` + ``--days 1``, the current_date is a weekday.
+    def test_days_advances_calendar_day(self, tmp_path: Path) -> None:
+        """After ``--reset`` + ``--days 1``, the current_date is exactly 1 day later.
 
-        The simulation advances business days only, so the current_date after
-        one day must be Monday–Friday.
+        The simulation now advances every calendar day (including weekends and
+        holidays).  Exchange rates and weekend EDI orders still run on non-business
+        days, so the loop must advance 1 calendar day per ``--days 1`` call.
         """
         _setup_tmp(tmp_path)
         _run(["--reset"], tmp_path)
+
+        status_before = _run(["--status"], tmp_path)
+        start = _extract_current_date(status_before.stdout)
+
         _run(["--days", "1"], tmp_path)
 
-        status = _run(["--status"], tmp_path)
-        current = _extract_current_date(status.stdout)
+        status_after = _run(["--status"], tmp_path)
+        current = _extract_current_date(status_after.stdout)
 
-        assert current.weekday() < 5, (
-            f"Expected a weekday after advancing 1 business day, got {current} "
-            f"(weekday={current.weekday()}, 5=Sat 6=Sun)"
+        from datetime import timedelta
+        expected = start + timedelta(days=1)
+        assert current == expected, (
+            f"Expected current_date to advance by exactly 1 calendar day: "
+            f"{start} → {expected}, got {current}"
         )
 
     def test_days_is_cumulative(self, tmp_path: Path) -> None:

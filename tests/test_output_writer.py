@@ -81,7 +81,15 @@ def test_all_erp_event_types_route_correctly(tmp_path: Path) -> None:
     events = [_erp(et, event_id=f"e{i:03d}") for i, et in enumerate(ERP_EVENT_TYPES)]
     written = write_events(events, _SIM_DATE, output_dir=tmp_path)
 
-    assert len(written) == len(ERP_EVENT_TYPES)
+    # Multiple event_type keys may share the same file stem (e.g. singular and
+    # plural variants, credit_hold/credit_release → credit_events.json).
+    # Assert that every unique stem gets its own file, and that every event_type
+    # is served by at least one written file.
+    unique_stems = set(ERP_EVENT_TYPES.values())
+    assert len(written) == len(unique_stems), (
+        f"Expected {len(unique_stems)} files (one per unique stem), got {len(written)}: "
+        f"{[p.name for p in written]}"
+    )
     written_names = {p.name for p in written}
     for et, stem in ERP_EVENT_TYPES.items():
         assert f"{stem}.json" in written_names, f"Missing file for event_type={et!r}"

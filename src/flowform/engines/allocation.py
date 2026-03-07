@@ -30,6 +30,7 @@ from pydantic import BaseModel
 
 from flowform.calendar import is_business_day
 from flowform.config import Config
+from flowform.engines._order_utils import update_order_status
 from flowform.engines.inventory_movements import InventoryMovementEvent, _make_event
 from flowform.state import SimulationState
 
@@ -470,31 +471,13 @@ def _run_allocation(
 def _update_order_status(order: dict[str, Any]) -> None:
     """Recalculate and update the order-level status from its lines.
 
-    Rules:
-    - All lines "allocated" → "allocated"
-    - All lines "cancelled" → "cancelled"
-    - Any line "backordered" or "partially_allocated" → "partially_allocated"
-    - Mix of "allocated" + terminal → "partially_allocated"
+    Delegates to the shared :func:`~flowform.engines._order_utils.update_order_status`
+    utility so both the allocation and modifications engines stay in sync.
 
     Args:
         order: Order dict (mutated in place).
     """
-    lines = order.get("lines", [])
-    if not lines:
-        return
-
-    statuses = {line.get("line_status", "open") for line in lines}
-
-    if statuses == {"allocated"}:
-        order["status"] = "allocated"
-    elif statuses == {"cancelled"}:
-        order["status"] = "cancelled"
-    elif statuses <= {"allocated", "cancelled"}:
-        # All either allocated or cancelled — treat as allocated
-        order["status"] = "allocated"
-    elif "backordered" in statuses or "partially_allocated" in statuses:
-        order["status"] = "partially_allocated"
-    # else: leave status unchanged (e.g. still "open" / "confirmed")
+    update_order_status(order)
 
 
 # ---------------------------------------------------------------------------

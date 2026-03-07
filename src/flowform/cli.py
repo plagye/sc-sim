@@ -10,9 +10,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import shutil
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -35,13 +36,98 @@ def _find_config() -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Day loop stub (Phase 2 will wire real engines here)
+# Day loop — Steps 1–8 wired (Phase 2)
 # ---------------------------------------------------------------------------
 
-def _run_day_loop(state: object, config: object, sim_date: date) -> None:  # type: ignore[type-arg]
-    """Stub day loop.  Replaced in Phase 2 with real engine calls."""
-    # Access sim_day from state dynamically to keep import clean
-    print(f"  Day {state.sim_day}: {sim_date}")  # type: ignore[attr-defined]
+def _run_day_loop(
+    state: object,
+    config: object,
+    sim_date: date,
+    output_dir: Path | None = None,
+) -> list:  # type: ignore[type-arg]
+    """Run all wired simulation steps for *sim_date* and write output files.
+
+    Steps implemented:
+      2. Exchange rates  — runs every calendar day including weekends
+      3. Production      — engine self-guards (business days only)
+      5. Orders          — engine self-guards; weekend EDI handled internally
+      6. Credit check    — engine self-guards (business days only)
+      7. Modifications & cancellations — engine self-guards (business days only)
+      8. Allocation with backorders    — engine self-guards (business days only)
+      + Inventory movements — after production (receipts) and after allocation (picks)
+
+    Steps 1, 4, 9–20 are not yet wired (see TODO comments).
+
+    Args:
+        state:      Mutable simulation state.
+        config:     Validated simulation config.
+        sim_date:   The simulated calendar date to process.
+        output_dir: Override output root directory.  Defaults to ``Path("output")``
+                    (relative to CWD).  Pass an absolute path in tests to avoid
+                    writing to the real project directory.
+
+    Returns:
+        List of all raw event objects generated for this day (before serialisation).
+    """
+    from flowform.calendar import is_business_day
+    from flowform.engines import (
+        allocation,
+        credit,
+        exchange_rates,
+        inventory_movements,
+        modifications,
+        orders,
+        production,
+    )
+    from flowform.output.writer import write_events
+
+    all_events: list = []
+
+    # Step 2: Exchange rates — every day including weekends
+    all_events.extend(exchange_rates.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Step 3: Production (self-guards to business days)
+    all_events.extend(production.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Step 4: Demand signals — TODO (Step 33)
+
+    # Step 5: Orders (self-guards; weekend EDI for Distributors handled internally)
+    all_events.extend(orders.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Step 6: Credit check (self-guards to business days)
+    all_events.extend(credit.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Step 7: Modifications & cancellations (self-guards to business days)
+    all_events.extend(modifications.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Step 8: Allocation with backorders (self-guards to business days)
+    all_events.extend(allocation.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Inventory movements: receipts (mirrors production) + picks (mirrors allocation)
+    # + transfers, adjustments, scrap.  Must run after both production and allocation.
+    all_events.extend(inventory_movements.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Steps 9–16: TODO (load planning, lifecycle, returns, payments, transfers,
+    #              demand planning, master data, snapshots)
+
+    # Step 17: Schema evolution — TODO
+    # Step 18: Noise injection — TODO
+
+    # Serialise all events to output files
+    # write_events takes (events_as_dicts, sim_date, output_dir)
+    serialised = [
+        e.model_dump() if hasattr(e, "model_dump") else dict(e)
+        for e in all_events
+    ]
+    if output_dir is not None:
+        write_events(serialised, sim_date, output_dir=output_dir)
+    else:
+        write_events(serialised, sim_date)
+
+    day_type = "biz" if is_business_day(sim_date) else "weekend/holiday"
+    print(f"  Day {state.sim_day}: {sim_date} ({day_type}) — {len(all_events)} events")  # type: ignore[attr-defined]
+
+    return all_events
 
 
 # ---------------------------------------------------------------------------
@@ -92,8 +178,16 @@ def _cmd_status() -> None:
 
 
 def _simulate_days(config: object, n_days: int) -> None:  # type: ignore[type-arg]
-    """Shared helper: simulate n_days business days and persist state."""
-    from flowform.calendar import next_business_day
+    """Shared helper: simulate *n_days* **calendar** days and persist state.
+
+    Advances one calendar day at a time.  Weekend and holiday days are still
+    processed (exchange rates run 7 days a week; weekend EDI orders arrive from
+    Distributors).  Engines that are business-day-only self-guard internally.
+
+    Args:
+        config: Validated simulation config.
+        n_days: Number of calendar days to advance.
+    """
     from flowform.state import SimulationState
 
     try:
@@ -103,13 +197,13 @@ def _simulate_days(config: object, n_days: int) -> None:  # type: ignore[type-ar
         sys.exit(1)
 
     for _ in range(n_days):
-        next_date = next_business_day(state.current_date)
+        next_date = state.current_date + timedelta(days=1)
         state.advance_day(next_date)
         _run_day_loop(state, config, next_date)
         state.save()
 
     print(
-        f"Simulated {n_days} business days. "
+        f"Simulated {n_days} calendar days. "
         f"Current date: {state.current_date} (sim day {state.sim_day})."
     )
 
@@ -120,8 +214,7 @@ def _cmd_days(config: object, n: int) -> None:  # type: ignore[type-arg]
 
 
 def _cmd_until(config: object, target: date) -> None:  # type: ignore[type-arg]
-    """--until DATE: simulate up to and including target date."""
-    from flowform.calendar import next_business_day
+    """--until DATE: simulate every calendar day up to and including target date."""
     from flowform.state import SimulationState
 
     try:
@@ -139,16 +232,14 @@ def _cmd_until(config: object, target: date) -> None:  # type: ignore[type-arg]
 
     days_simulated = 0
     while state.current_date < target:
-        next_date = next_business_day(state.current_date)
-        if next_date > target:
-            break
+        next_date = state.current_date + timedelta(days=1)
         state.advance_day(next_date)
         _run_day_loop(state, config, next_date)
         state.save()
         days_simulated += 1
 
     print(
-        f"Simulated {days_simulated} business days. "
+        f"Simulated {days_simulated} calendar days. "
         f"Current date: {state.current_date} (sim day {state.sim_day})."
     )
 
