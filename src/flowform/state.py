@@ -117,6 +117,44 @@ def _warehouse_from_dict(d: dict[str, Any]) -> Warehouse:
 
 
 # ---------------------------------------------------------------------------
+# Inventory seeding helper
+# ---------------------------------------------------------------------------
+
+
+def _seed_initial_inventory(
+    catalog: list[CatalogEntry],
+    warehouses: list[Warehouse],
+    rng: random.Random,
+) -> dict[str, dict[str, int]]:
+    """Generate realistic starting inventory across warehouses.
+
+    ~65% of catalog SKUs get initial stock.  W01 is primary (80% split);
+    W02 gets a fraction of W01 stock ~50% of the time.
+
+    Args:
+        catalog:    Full catalog of 2 500 active SKUs.
+        warehouses: List of Warehouse objects (must include W01 and W02).
+        rng:        Seeded RNG for reproducibility.
+
+    Returns:
+        Nested dict ``{warehouse_code: {sku: quantity}}``.
+    """
+    inventory: dict[str, dict[str, int]] = {w.code: {} for w in warehouses}
+
+    for entry in catalog:
+        if rng.random() > 0.65:
+            continue  # ~35% of SKUs not stocked at start
+
+        w01_qty = rng.randint(20, 300)
+        inventory["W01"][entry.sku] = w01_qty
+
+        if rng.random() < 0.50:
+            inventory["W02"][entry.sku] = max(1, int(w01_qty * rng.uniform(0.05, 0.25)))
+
+    return inventory
+
+
+# ---------------------------------------------------------------------------
 # SimulationState
 # ---------------------------------------------------------------------------
 
@@ -152,6 +190,9 @@ class SimulationState:
         in_transit_returns: list[dict[str, Any]],
         exchange_rates: dict[str, float],
         schema_flags: dict[str, bool],
+        counters: dict[str, int],
+        production_pipeline: list[dict[str, Any]],
+        daily_production_receipts: list[dict[str, Any]] | None = None,
     ) -> None:
         self._db_path = db_path
         self.sim_day = sim_day
@@ -171,6 +212,13 @@ class SimulationState:
         self.in_transit_returns = in_transit_returns
         self.exchange_rates = exchange_rates
         self.schema_flags = schema_flags
+        self.counters = counters
+        self.production_pipeline = production_pipeline
+        # Ephemeral: cleared at start of each day; NOT persisted to SQLite.
+        # Populated by the production engine; read by inventory_movements engine.
+        self.daily_production_receipts: list[dict[str, Any]] = (
+            daily_production_receipts if daily_production_receipts is not None else []
+        )
 
     # ------------------------------------------------------------------
     # Public class methods
@@ -200,7 +248,7 @@ class SimulationState:
         warehouses = list(ALL_WAREHOUSES)
 
         # Initialise operational tables
-        inventory: dict[str, dict[str, int]] = {w.code: {} for w in warehouses}
+        inventory = _seed_initial_inventory(catalog, warehouses, rng)
         allocated: dict[str, dict[str, int]] = {w.code: {} for w in warehouses}
         open_orders: dict[str, dict[str, Any]] = {}
         customer_balances: dict[str, float] = {c.customer_id: 0.0 for c in customers}
@@ -209,6 +257,14 @@ class SimulationState:
         in_transit_returns: list[dict[str, Any]] = []
         exchange_rates: dict[str, float] = {"EUR": 4.30, "USD": 4.05}
         schema_flags: dict[str, bool] = {"sales_channel": False, "incoterms": False}
+        counters: dict[str, int] = {
+            "order": 1000,
+            "batch": 1000,
+            "shipment": 1000,
+            "load": 1000,
+            "return": 1000,
+        }
+        production_pipeline: list[dict[str, Any]] = []
 
         state = cls(
             db_path=resolved_db,
@@ -229,6 +285,8 @@ class SimulationState:
             in_transit_returns=in_transit_returns,
             exchange_rates=exchange_rates,
             schema_flags=schema_flags,
+            counters=counters,
+            production_pipeline=production_pipeline,
         )
         state.save()
         return state
@@ -285,12 +343,29 @@ class SimulationState:
     def advance_day(self, new_date: date) -> None:
         """Increment ``sim_day`` and update ``current_date``.
 
+        Also clears ephemeral per-day buffers (``daily_production_receipts``).
+
         Args:
             new_date: The new simulated calendar date (must be strictly after
                       ``current_date``).
         """
         self.sim_day += 1
         self.current_date = new_date
+        # Clear per-day ephemeral buffer so engines see only today's receipts.
+        self.daily_production_receipts = []
+
+    def next_id(self, counter_name: str) -> int:
+        """Increment and return the next sequential ID for *counter_name*.
+
+        Args:
+            counter_name: One of ``"order"``, ``"batch"``, ``"shipment"``,
+                          ``"load"``, or ``"return"``.
+
+        Returns:
+            The new counter value (post-increment).
+        """
+        self.counters[counter_name] += 1
+        return self.counters[counter_name]
 
     # ------------------------------------------------------------------
     # Internal: schema creation
@@ -410,6 +485,8 @@ class SimulationState:
             "in_transit_returns": self.in_transit_returns,
             "exchange_rates": self.exchange_rates,
             "schema_flags": self.schema_flags,
+            "counters": self.counters,
+            "production_pipeline": self.production_pipeline,
         }
         for key, value in ops.items():
             conn.execute(
@@ -478,6 +555,10 @@ class SimulationState:
         in_transit_returns: list[dict[str, Any]] = _kv("in_transit_returns") or []
         exchange_rates: dict[str, float] = _kv("exchange_rates") or {"EUR": 4.30, "USD": 4.05}
         schema_flags: dict[str, bool] = _kv("schema_flags") or {"sales_channel": False, "incoterms": False}
+        counters: dict[str, int] = _kv("counters") or {
+            "order": 1000, "batch": 1000, "shipment": 1000, "load": 1000, "return": 1000,
+        }
+        production_pipeline: list[dict[str, Any]] = _kv("production_pipeline") or []
 
         return cls(
             db_path=db_path,
@@ -498,4 +579,6 @@ class SimulationState:
             in_transit_returns=in_transit_returns,
             exchange_rates=exchange_rates,
             schema_flags=schema_flags,
+            counters=counters,
+            production_pipeline=production_pipeline,
         )

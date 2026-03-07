@@ -299,3 +299,95 @@ def test_catalog_weight_round_trip(config, db_path):
         assert loaded_weights[sku] == pytest.approx(weight, rel=1e-6), (
             f"weight mismatch for {sku}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 11: counters round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_counters_roundtrip(config, db_path):
+    state = SimulationState.from_new(config, db_path=db_path)
+
+    assert set(state.counters.keys()) == {"order", "batch", "shipment", "load", "return"}
+    assert all(v == 1000 for v in state.counters.values())
+
+    state.counters["order"] = 1042
+    state.counters["load"] = 1007
+    state.save()
+
+    loaded = SimulationState.from_db(config, db_path=db_path)
+    assert loaded.counters["order"] == 1042
+    assert loaded.counters["load"] == 1007
+    assert loaded.counters["batch"] == 1000
+
+
+# ---------------------------------------------------------------------------
+# Test 12: next_id() increments sequentially
+# ---------------------------------------------------------------------------
+
+
+def test_next_id_increments(config, db_path):
+    state = SimulationState.from_new(config, db_path=db_path)
+
+    first = state.next_id("order")
+    second = state.next_id("order")
+
+    assert first == 1001
+    assert second == 1002
+    assert state.counters["order"] == 1002
+
+
+# ---------------------------------------------------------------------------
+# Test 13: production_pipeline round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_production_pipeline_roundtrip(config, db_path):
+    state = SimulationState.from_new(config, db_path=db_path)
+
+    assert state.production_pipeline == []
+
+    entry = {
+        "batch_id": "BATCH-1001",
+        "sku": "FF-BL50-CS-PN16-FMAN",
+        "quantity": 50,
+        "production_line": 2,
+        "start_date": "2026-01-06",
+        "completion_date": "2026-01-09",
+    }
+    state.production_pipeline.append(entry)
+    state.save()
+
+    loaded = SimulationState.from_db(config, db_path=db_path)
+    assert len(loaded.production_pipeline) == 1
+    assert loaded.production_pipeline[0]["batch_id"] == "BATCH-1001"
+    assert loaded.production_pipeline[0]["quantity"] == 50
+    assert loaded.production_pipeline[0]["production_line"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Test 14: initial inventory is seeded (not empty)
+# ---------------------------------------------------------------------------
+
+
+def test_initial_inventory_seeded(config, db_path):
+    state = SimulationState.from_new(config, db_path=db_path)
+
+    w01 = state.inventory["W01"]
+    w02 = state.inventory["W02"]
+    catalog_skus = {e.sku for e in state.catalog}
+
+    # At least 50% of catalog SKUs should have W01 stock
+    stocked_fraction = len(w01) / len(catalog_skus)
+    assert stocked_fraction >= 0.50, f"Only {stocked_fraction:.1%} of SKUs stocked in W01"
+
+    # Total units across W01 must be positive
+    assert sum(w01.values()) > 0
+
+    # All stocked SKUs must be valid catalog SKUs
+    assert set(w01.keys()).issubset(catalog_skus)
+    assert set(w02.keys()).issubset(catalog_skus)
+
+    # W02 should be a fraction of W01 (not exceed it)
+    assert sum(w02.values()) < sum(w01.values())
