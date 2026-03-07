@@ -54,9 +54,10 @@ def _run_day_loop(
       6. Credit check    — engine self-guards (business days only)
       7. Modifications & cancellations — engine self-guards (business days only)
       8. Allocation with backorders    — engine self-guards (business days only)
+      9. Load planning   — engine self-guards (business days, not holidays)
       + Inventory movements — after production (receipts) and after allocation (picks)
 
-    Steps 1, 4, 9–20 are not yet wired (see TODO comments).
+    Steps 1, 4, 10–20 are not yet wired (see TODO comments).
 
     Args:
         state:      Mutable simulation state.
@@ -75,6 +76,8 @@ def _run_day_loop(
         credit,
         exchange_rates,
         inventory_movements,
+        load_lifecycle,
+        load_planning,
         modifications,
         orders,
         production,
@@ -103,12 +106,18 @@ def _run_day_loop(
     # Step 8: Allocation with backorders (self-guards to business days)
     all_events.extend(allocation.run(state, config, sim_date))  # type: ignore[arg-type]
 
+    # Step 9: Load planning (self-guards to business days, not holidays)
+    all_events.extend(load_planning.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Step 10: Load lifecycle — every day, carriers run weekends
+    all_events.extend(load_lifecycle.run(state, config, sim_date))  # type: ignore[arg-type]
+
     # Inventory movements: receipts (mirrors production) + picks (mirrors allocation)
     # + transfers, adjustments, scrap.  Must run after both production and allocation.
     all_events.extend(inventory_movements.run(state, config, sim_date))  # type: ignore[arg-type]
 
-    # Steps 9–16: TODO (load planning, lifecycle, returns, payments, transfers,
-    #              demand planning, master data, snapshots)
+    # Steps 11–16: TODO (returns, payments, transfers,
+    #               demand planning, master data, snapshots)
 
     # Step 17: Schema evolution — TODO
     # Step 18: Noise injection — TODO

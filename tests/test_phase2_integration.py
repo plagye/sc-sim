@@ -387,7 +387,7 @@ class TestPhase2Integration:
         state = sim_result["state"]
         valid_statuses = {
             "confirmed", "credit_hold", "allocated", "partially_allocated",
-            "shipped", "cancelled",
+            "shipped", "partially_shipped", "cancelled",
         }
         for order_id, order in state.open_orders.items():
             status = order.get("status")

@@ -34,6 +34,10 @@ def update_order_status(order: dict[str, Any]) -> None:
     elif statuses <= {"allocated", "cancelled"}:
         # All either allocated or cancelled — treat as allocated
         order["status"] = "allocated"
+    elif statuses <= {"shipped", "cancelled"}:
+        order["status"] = "shipped"
+    elif "shipped" in statuses:
+        order["status"] = "partially_shipped"
     elif "backordered" in statuses or "partially_allocated" in statuses:
         order["status"] = "partially_allocated"
     # else: leave status unchanged

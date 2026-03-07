@@ -232,6 +232,7 @@ def _run_escalation(
                                 days_backordered=days,
                             )
                         )
+                        update_order_status(order)
                     continue  # skip escalation check for cancelled line
 
             # 14-day escalation: standard → express
