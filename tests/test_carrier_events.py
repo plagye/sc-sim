@@ -126,9 +126,9 @@ def test_capacity_alert_fields(state, config):
     assert ev.event_type == "carrier_event"
     assert ev.event_subtype == "capacity_alert"
     assert ev.event_id != ""
-    assert ev.carrier_id != ""
+    assert ev.carrier_code != ""
     assert ev.carrier_name != ""
-    assert ev.severity in {"low", "medium", "high"}
+    assert ev.impact_severity in {"low", "medium", "high"}
     assert ev.start_date == _BIZ_DAY.isoformat()
     assert ev.simulation_date == _BIZ_DAY.isoformat()
     assert ev.timestamp.endswith("Z")
@@ -146,9 +146,9 @@ def test_capacity_alert_fields(state, config):
 
 def test_disruption_fields(state, config):
     """A disruption event must have end_date set and rate_delta_pct as None."""
-    ev = _get_event_of_subtype(state, config, _BIZ_DAY, "disruption")
+    ev = _get_event_of_subtype(state, config, _BIZ_DAY, "service_disruption")
 
-    assert ev.event_subtype == "disruption"
+    assert ev.event_subtype == "service_disruption"
     assert ev.end_date is not None
     # end_date must parse as a valid ISO date after sim_date
     end = date.fromisoformat(ev.end_date)
@@ -164,9 +164,9 @@ def test_disruption_fields(state, config):
 def test_disruption_added_to_state(state, config):
     """After a disruption fires, the carrier must appear in
     state.carrier_disruptions with 'end_date' and 'severity' keys."""
-    ev = _get_event_of_subtype(state, config, _BIZ_DAY, "disruption")
+    ev = _get_event_of_subtype(state, config, _BIZ_DAY, "service_disruption")
 
-    carrier_code = ev.carrier_id
+    carrier_code = ev.carrier_code
     assert carrier_code in state.carrier_disruptions
 
     disrupt = state.carrier_disruptions[carrier_code]
@@ -199,7 +199,10 @@ def test_disruption_prevents_second_disruption(state, config):
         # Do NOT clear carrier_disruptions — we want the block to stay active
         evts = carrier_events.run(state, config, _BIZ_DAY)
         for ev in evts:
-            if ev.event_subtype == "disruption" and ev.carrier_id == first_carrier.code:
+            if (
+                ev.event_subtype == "service_disruption"
+                and ev.carrier_code == first_carrier.code
+            ):
                 disruption_count_for_carrier += 1
 
     assert disruption_count_for_carrier == 0, (

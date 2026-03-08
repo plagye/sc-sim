@@ -10,7 +10,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import datetime
 import shutil
 import sys
 from datetime import date, timedelta
@@ -81,6 +80,7 @@ def _run_day_loop(
         load_planning,
         modifications,
         orders,
+        pod,
         production,
     )
     from flowform.output.writer import write_events
@@ -115,6 +115,13 @@ def _run_day_loop(
 
     # Step 10: Load lifecycle — every day, carriers run weekends
     all_events.extend(load_lifecycle.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Step 10.5: POD — business days only (self-guards internally)
+    # Must run AFTER load_lifecycle so that loads delivered today are registered
+    # in pending_pod before the POD engine checks them. (Loads delivered today
+    # will not fire POD today because pod_due_date is at least 1 business day
+    # in the future.)
+    all_events.extend(pod.run(state, config, sim_date))  # type: ignore[arg-type]
 
     # Inventory movements: receipts (mirrors production) + picks (mirrors allocation)
     # + transfers, adjustments, scrap.  Must run after both production and allocation.

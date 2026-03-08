@@ -83,15 +83,16 @@ class CarrierEvent(BaseModel):
 
     event_type: Literal["carrier_event"] = "carrier_event"
     event_id: str                        # uuid4 string
-    event_subtype: str                   # "capacity_alert" | "disruption" | "rate_change"  # noqa: E501
-    carrier_id: str                      # carrier code, e.g. "DHL"
+    event_subtype: str                   # "capacity_alert" | "service_disruption" | "rate_change"  # noqa: E501
+    carrier_code: str                    # carrier code, e.g. "DHL"
     carrier_name: str                    # human-readable name
     affected_region: str | None          # NUTS3 region code or None
-    severity: str                        # "low" | "medium" | "high"
+    impact_severity: str                 # "low" | "medium" | "high"
     start_date: str                      # ISO date (sim_date)
     end_date: str | None                 # ISO date for disruptions, None otherwise
+    duration_days: int | None            # duration in days for disruptions, None o/w
     rate_delta_pct: float | None         # rate_change only; +/- 5–15%
-    description: str                     # human-readable message
+    message: str                         # human-readable message
     simulation_date: str                 # ISO date
     timestamp: str                       # ISO datetime with Z suffix
     sync_window: str                     # "08" | "14" | "20"
@@ -185,15 +186,16 @@ def _generate_disruption(
 
     return CarrierEvent(
         event_id=str(uuid.uuid4()),
-        event_subtype="disruption",
-        carrier_id=carrier_code,
+        event_subtype="service_disruption",
+        carrier_code=carrier_code,
         carrier_name=carrier_name,
         affected_region=region,
-        severity=severity,
+        impact_severity=severity,
         start_date=sim_date.isoformat(),
         end_date=end_date.isoformat(),
+        duration_days=duration,
         rate_delta_pct=None,
-        description=description,
+        message=description,
         simulation_date=sim_date.isoformat(),
         timestamp=_make_timestamp(sim_date, sync_window),
         sync_window=sync_window,
@@ -228,14 +230,15 @@ def _generate_rate_change(
     return CarrierEvent(
         event_id=str(uuid.uuid4()),
         event_subtype="rate_change",
-        carrier_id=carrier_code,
+        carrier_code=carrier_code,
         carrier_name=carrier_name,
         affected_region=None,
-        severity="low",
+        impact_severity="low",
         start_date=sim_date.isoformat(),
         end_date=None,
+        duration_days=None,
         rate_delta_pct=round(magnitude, 4),
-        description=description,
+        message=description,
         simulation_date=sim_date.isoformat(),
         timestamp=_make_timestamp(sim_date, "14"),
         sync_window="14",
@@ -270,14 +273,15 @@ def _generate_capacity_alert(
     return CarrierEvent(
         event_id=str(uuid.uuid4()),
         event_subtype="capacity_alert",
-        carrier_id=carrier_code,
+        carrier_code=carrier_code,
         carrier_name=carrier_name,
         affected_region=region,
-        severity=severity,
+        impact_severity=severity,
         start_date=sim_date.isoformat(),
         end_date=None,
+        duration_days=None,
         rate_delta_pct=None,
-        description=description,
+        message=description,
         simulation_date=sim_date.isoformat(),
         timestamp=_make_timestamp(sim_date, sync_window),
         sync_window=sync_window,

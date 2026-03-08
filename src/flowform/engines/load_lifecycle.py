@@ -24,6 +24,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from flowform.config import Config
+from flowform.engines.carrier_events import DISRUPTION_SEVERITY_PENALTY
 from flowform.engines.load_planning import LoadEvent
 from flowform.master_data.carriers import reliability_on_date as _carrier_reliability
 from flowform.state import SimulationState
@@ -44,6 +45,31 @@ _TRANSIT_DAYS_FALLBACK: tuple[int, int] = (2, 4)
 
 # Terminal statuses — loads in these states are never touched
 _TERMINAL_STATUSES: frozenset[str] = frozenset({"delivered", "cancelled"})
+
+
+# ---------------------------------------------------------------------------
+# Business day advancement helper
+# ---------------------------------------------------------------------------
+
+
+def _advance_business_days(start: date, n: int) -> date:
+    """Return the date that is *n* business days after *start*.
+
+    Args:
+        start: The starting calendar date (not included in count).
+        n:     Number of business days to advance.
+
+    Returns:
+        The calendar date exactly *n* business days after *start*.
+    """
+    from flowform.calendar import is_business_day
+    current = start
+    count = 0
+    while count < n:
+        current += timedelta(days=1)
+        if is_business_day(current):
+            count += 1
+    return current
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +214,6 @@ def run(
                 disrupt = disruptions[carrier_code]
                 disrupt_end = date.fromisoformat(disrupt["end_date"])
                 if sim_date <= disrupt_end:
-                    from flowform.engines.carrier_events import DISRUPTION_SEVERITY_PENALTY
                     penalty = DISRUPTION_SEVERITY_PENALTY.get(
                         disrupt.get("severity", "medium"), 0.20
                     )
@@ -231,7 +256,6 @@ def run(
                 disrupt = disruptions[carrier_code]
                 disrupt_end = date.fromisoformat(disrupt["end_date"])
                 if sim_date <= disrupt_end:
-                    from flowform.engines.carrier_events import DISRUPTION_SEVERITY_PENALTY
                     penalty = DISRUPTION_SEVERITY_PENALTY.get(
                         disrupt.get("severity", "medium"), 0.20
                     )
@@ -244,6 +268,26 @@ def run(
             # Transition succeeds
             load["actual_arrival"] = sim_date.isoformat()
             load["status"] = "delivered"
+
+            # Register load for POD tracking (1–3 business days after delivery)
+            pod_delay_biz_days = state.rng.randint(1, 3)
+            pod_due_date = _advance_business_days(sim_date, pod_delay_biz_days)
+            state.pending_pod[load["load_id"]] = {
+                "load_id": load["load_id"],
+                "carrier_code": load["carrier_code"],
+                "source_warehouse_id": load["source_warehouse_id"],
+                "shipment_ids": load["shipment_ids"],
+                "order_ids": load["order_ids"],
+                "total_weight_kg": load["total_weight_kg"],
+                "weight_unit": load["weight_unit"],
+                "total_weight_reported": load["total_weight_reported"],
+                "sync_window": load["sync_window"],
+                "priority": load["priority"],
+                "customer_ids": load["customer_ids"],
+                "planned_date": load["planned_date"],
+                "delivery_date": sim_date.isoformat(),
+                "pod_due_date": pod_due_date.isoformat(),
+            }
 
             _update_order_lines_on_delivery(state, load)
 

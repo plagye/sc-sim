@@ -16,7 +16,6 @@ import json
 import pickle
 import random
 import sqlite3
-from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -194,6 +193,7 @@ class SimulationState:
         production_pipeline: list[dict[str, Any]],
         daily_production_receipts: list[dict[str, Any]] | None = None,
         carrier_disruptions: dict[str, dict[str, Any]] | None = None,
+        pending_pod: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self._db_path = db_path
         self.sim_day = sim_day
@@ -224,6 +224,10 @@ class SimulationState:
         # Each value is a dict with at least "end_date" and "severity".
         self.carrier_disruptions: dict[str, dict[str, Any]] = (
             carrier_disruptions if carrier_disruptions is not None else {}
+        )
+        # POD pending loads: key=load_id, value={load snapshot dict + delivery metadata}
+        self.pending_pod: dict[str, dict[str, Any]] = (
+            pending_pod if pending_pod is not None else {}
         )
 
     # ------------------------------------------------------------------
@@ -294,6 +298,7 @@ class SimulationState:
             counters=counters,
             production_pipeline=production_pipeline,
             carrier_disruptions={},
+            pending_pod={},
         )
         state.save()
         return state
@@ -495,6 +500,7 @@ class SimulationState:
             "counters": self.counters,
             "production_pipeline": self.production_pipeline,
             "carrier_disruptions": self.carrier_disruptions,
+            "pending_pod": self.pending_pod,
         }
         for key, value in ops.items():
             conn.execute(
@@ -567,7 +573,10 @@ class SimulationState:
             "order": 1000, "batch": 1000, "shipment": 1000, "load": 1000, "return": 1000,
         }
         production_pipeline: list[dict[str, Any]] = _kv("production_pipeline") or []
-        carrier_disruptions: dict[str, dict[str, Any]] = _kv("carrier_disruptions") or {}
+        carrier_disruptions: dict[str, dict[str, Any]] = (
+            _kv("carrier_disruptions") or {}
+        )
+        pending_pod: dict[str, dict[str, Any]] = _kv("pending_pod") or {}
 
         return cls(
             db_path=db_path,
@@ -591,4 +600,5 @@ class SimulationState:
             counters=counters,
             production_pipeline=production_pipeline,
             carrier_disruptions=carrier_disruptions,
+            pending_pod=pending_pod,
         )
