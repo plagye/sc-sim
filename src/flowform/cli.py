@@ -56,7 +56,7 @@ def _run_day_loop(
       9. Load planning   — engine self-guards (business days, not holidays)
       + Inventory movements — after production (receipts) and after allocation (picks)
 
-    Steps 1, 4, 10–20 are not yet wired (see TODO comments).
+    Steps 1, 4, 12, 14–20 are not yet wired (see TODO comments).
 
     Args:
         state:      Mutable simulation state.
@@ -82,6 +82,8 @@ def _run_day_loop(
         orders,
         pod,
         production,
+        returns,
+        transfers,
     )
     from flowform.output.writer import write_events
 
@@ -127,8 +129,13 @@ def _run_day_loop(
     # + transfers, adjustments, scrap.  Must run after both production and allocation.
     all_events.extend(inventory_movements.run(state, config, sim_date))  # type: ignore[arg-type]
 
-    # Steps 11–16: TODO (returns, payments, transfers,
-    #               demand planning, master data, snapshots)
+    # Step 11: Returns / RMA flow (self-guards to business days)
+    all_events.extend(returns.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Step 13: Inter-warehouse transfers — demand-pull replenishment W01→W02
+    all_events.extend(transfers.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Steps 12, 14–16: TODO (payments, demand planning, master data, snapshots)
 
     # Step 17: Schema evolution — TODO
     # Step 18: Noise injection — TODO
