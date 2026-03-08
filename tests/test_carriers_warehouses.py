@@ -151,9 +151,10 @@ def test_dhl_highest_reliability():
     assert DHL.base_reliability == max(reliabilities)
 
 
-def test_baltic_same_day_transit():
-    assert BALTIC.transit_days_min == 1
-    assert BALTIC.transit_days_max == 1
+def test_baltic_transit_range():
+    """BalticHaul has a 4–7 day transit range (Gdańsk port, long haul)."""
+    assert BALTIC.transit_days_min == 4
+    assert BALTIC.transit_days_max == 7
 
 
 # ---------------------------------------------------------------------------

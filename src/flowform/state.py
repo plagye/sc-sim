@@ -193,6 +193,7 @@ class SimulationState:
         counters: dict[str, int],
         production_pipeline: list[dict[str, Any]],
         daily_production_receipts: list[dict[str, Any]] | None = None,
+        carrier_disruptions: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self._db_path = db_path
         self.sim_day = sim_day
@@ -218,6 +219,11 @@ class SimulationState:
         # Populated by the production engine; read by inventory_movements engine.
         self.daily_production_receipts: list[dict[str, Any]] = (
             daily_production_receipts if daily_production_receipts is not None else []
+        )
+        # Active carrier disruptions keyed by carrier_code.
+        # Each value is a dict with at least "end_date" and "severity".
+        self.carrier_disruptions: dict[str, dict[str, Any]] = (
+            carrier_disruptions if carrier_disruptions is not None else {}
         )
 
     # ------------------------------------------------------------------
@@ -287,6 +293,7 @@ class SimulationState:
             schema_flags=schema_flags,
             counters=counters,
             production_pipeline=production_pipeline,
+            carrier_disruptions={},
         )
         state.save()
         return state
@@ -487,6 +494,7 @@ class SimulationState:
             "schema_flags": self.schema_flags,
             "counters": self.counters,
             "production_pipeline": self.production_pipeline,
+            "carrier_disruptions": self.carrier_disruptions,
         }
         for key, value in ops.items():
             conn.execute(
@@ -559,6 +567,7 @@ class SimulationState:
             "order": 1000, "batch": 1000, "shipment": 1000, "load": 1000, "return": 1000,
         }
         production_pipeline: list[dict[str, Any]] = _kv("production_pipeline") or []
+        carrier_disruptions: dict[str, dict[str, Any]] = _kv("carrier_disruptions") or {}
 
         return cls(
             db_path=db_path,
@@ -581,4 +590,5 @@ class SimulationState:
             schema_flags=schema_flags,
             counters=counters,
             production_pipeline=production_pipeline,
+            carrier_disruptions=carrier_disruptions,
         )

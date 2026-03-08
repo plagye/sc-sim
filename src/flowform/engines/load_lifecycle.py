@@ -183,6 +183,16 @@ def run(
                 if carrier_obj is not None
                 else 1.0
             )
+            disruptions = getattr(state, "carrier_disruptions", {})
+            if carrier_code in disruptions:
+                disrupt = disruptions[carrier_code]
+                disrupt_end = date.fromisoformat(disrupt["end_date"])
+                if sim_date <= disrupt_end:
+                    from flowform.engines.carrier_events import DISRUPTION_SEVERITY_PENALTY
+                    penalty = DISRUPTION_SEVERITY_PENALTY.get(
+                        disrupt.get("severity", "medium"), 0.20
+                    )
+                    reliability = max(0.0, reliability - penalty)
             if state.rng.random() > reliability:
                 load.setdefault("delay_days", 0)
                 load["delay_days"] += 1
@@ -216,6 +226,16 @@ def run(
                 if carrier_obj is not None
                 else 1.0
             )
+            disruptions = getattr(state, "carrier_disruptions", {})
+            if carrier_code in disruptions:
+                disrupt = disruptions[carrier_code]
+                disrupt_end = date.fromisoformat(disrupt["end_date"])
+                if sim_date <= disrupt_end:
+                    from flowform.engines.carrier_events import DISRUPTION_SEVERITY_PENALTY
+                    penalty = DISRUPTION_SEVERITY_PENALTY.get(
+                        disrupt.get("severity", "medium"), 0.20
+                    )
+                    reliability = max(0.0, reliability - penalty)
             if state.rng.random() > reliability:
                 load.setdefault("delay_days", 0)
                 load["delay_days"] += 1

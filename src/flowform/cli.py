@@ -73,6 +73,7 @@ def _run_day_loop(
     from flowform.calendar import is_business_day
     from flowform.engines import (
         allocation,
+        carrier_events,
         credit,
         exchange_rates,
         inventory_movements,
@@ -108,6 +109,9 @@ def _run_day_loop(
 
     # Step 9: Load planning (self-guards to business days, not holidays)
     all_events.extend(load_planning.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Step 9.5: Carrier events — business days only (self-guards internally)
+    all_events.extend(carrier_events.run(state, config, sim_date))  # type: ignore[arg-type]
 
     # Step 10: Load lifecycle — every day, carriers run weekends
     all_events.extend(load_lifecycle.run(state, config, sim_date))  # type: ignore[arg-type]
