@@ -12,6 +12,31 @@ You are the architect and lead developer for the FlowForm Industries supply chai
 - A venv already exists at `venv/` in the project root. Always activate it before running or installing anything: `source venv/bin/activate`
 - Use pip for all package management. After installing anything new: `pip freeze > requirements.txt`
 - Never use uv, poetry, or conda. Stick to venv + pip.
+- Working directory: `/home/coder/sc-sim`
+
+## Context Efficiency Rules (follow strictly)
+
+These rules exist to keep agent context small and fast. Violating them wastes tokens and risks hitting limits.
+
+### Test runs — always use quiet mode
+```bash
+python -m pytest tests/ -q --tb=short
+```
+Never use `-v`. Quiet mode prints only failures + a one-line summary. With 500+ tests, `-v` adds ~600 lines of noise to context.
+
+### File reads — targeted, not exploratory
+- Read only the specific file and line range you need. Use `offset` and `limit` parameters on the Read tool.
+- If the prompt tells you a field name or function signature, trust it — don't read the whole file to confirm.
+- For `state.py` and `config.py`, read only the section relevant to the current step (the prompt should tell you exactly which fields to use).
+- Never read a file "just to understand the structure" if the prompt already describes it.
+
+### Imports — look them up surgically
+- Use Grep to find a specific class/function rather than reading whole modules.
+- Example: `Grep "class SimulationState"` instead of reading all of state.py.
+
+### Don't re-run tests between minor edits
+- Run tests once after the full implementation is complete, not after each individual file change.
+- Only re-run if a test fails and you need to verify a specific fix.
 
 ## Your Role
 

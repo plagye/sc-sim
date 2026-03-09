@@ -49,6 +49,7 @@ def _run_day_loop(
     Steps implemented:
       2. Exchange rates  — runs every calendar day including weekends
       3. Production      — engine self-guards (business days only)
+      4. Demand signals  — engine self-guards (business days only)
       5. Orders          — engine self-guards; weekend EDI handled internally
       6. Credit check    — engine self-guards (business days only)
       7. Modifications & cancellations — engine self-guards (business days only)
@@ -56,7 +57,7 @@ def _run_day_loop(
       9. Load planning   — engine self-guards (business days, not holidays)
       + Inventory movements — after production (receipts) and after allocation (picks)
 
-    Steps 1, 4, 12, 14–20 are not yet wired (see TODO comments).
+    Steps 1, 12, 14–20 are not yet wired (see TODO comments).
 
     Args:
         state:      Mutable simulation state.
@@ -74,16 +75,22 @@ def _run_day_loop(
         allocation,
         carrier_events,
         credit,
+        demand_signals,
         exchange_rates,
         inventory_movements,
         load_lifecycle,
         load_planning,
+        master_data_changes,
         modifications,
+        forecasts,
+        inventory_targets,
+        planning,
         orders,
         payments,
         pod,
         production,
         returns,
+        snapshots,
         transfers,
     )
     from flowform.output.writer import write_events
@@ -96,7 +103,8 @@ def _run_day_loop(
     # Step 3: Production (self-guards to business days)
     all_events.extend(production.run(state, config, sim_date))  # type: ignore[arg-type]
 
-    # Step 4: Demand signals — TODO (Step 33)
+    # Step 4: Demand signals (self-guards to business days)
+    all_events.extend(demand_signals.run(state, config, sim_date))  # type: ignore[arg-type]
 
     # Step 5: Orders (self-guards; weekend EDI for Distributors handled internally)
     all_events.extend(orders.run(state, config, sim_date))  # type: ignore[arg-type]
@@ -139,9 +147,25 @@ def _run_day_loop(
     # Step 13: Inter-warehouse replenishment transfers (business days only)
     all_events.extend(transfers.run(state, config, sim_date))  # type: ignore[arg-type]
 
-    # Steps 14–16: TODO (demand planning, master data, snapshots)
+    # Step 14: Demand planning (1st business day of month)
+    all_events.extend(planning.run(state, config, sim_date))  # type: ignore[arg-type]
 
-    # Step 17: Schema evolution — TODO
+    # Step 14b: Demand forecasts (1st business day of month)
+    all_events.extend(forecasts.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Step 14c: Inventory targets (1st business day of month)
+    all_events.extend(inventory_targets.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Step 15: Master data changes (random, business days only)
+    all_events.extend(master_data_changes.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Step 16: Inventory snapshots (end of day, business days only)
+    all_events.extend(snapshots.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Step 17: Schema evolution — fires at day thresholds
+    from flowform import schema_evolution
+    all_events.extend(schema_evolution.run(state, config, sim_date))  # type: ignore[arg-type]
+
     # Step 18: Noise injection — TODO
 
     # Serialise all events to output files

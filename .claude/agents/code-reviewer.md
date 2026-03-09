@@ -39,7 +39,7 @@ When asked to review, follow this sequence:
 ### Step 2: Run the test suite
 ```bash
 source venv/bin/activate
-python -m pytest tests/ -v --tb=short 2>&1 | tail -30
+python -m pytest tests/ -q --tb=short 2>&1 | tail -15
 ```
 - Confirm the claimed test count matches
 - Note any failures or warnings

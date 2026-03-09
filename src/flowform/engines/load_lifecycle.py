@@ -113,6 +113,9 @@ def _update_order_lines_on_delivery(
 ) -> None:
     """Mark all allocated lines on orders in this load as shipped.
 
+    Also invoices the shipped value into ``state.customer_balances`` so the
+    payment engine has a positive balance to work with.
+
     Args:
         state: Mutable simulation state (for ``open_orders`` access).
         load:  Delivered load record.
@@ -123,10 +126,32 @@ def _update_order_lines_on_delivery(
         order = state.open_orders.get(oid)
         if order is None:
             continue
+
+        # Accumulate the invoiced value of shipped lines into customer balance.
+        customer_id: str = order.get("customer_id", "")
+        currency: str = order.get("currency", "PLN")
+        if currency == "PLN":
+            rate = 1.0
+        elif currency == "EUR":
+            rate = state.exchange_rates.get("EUR", 4.30)
+        elif currency == "USD":
+            rate = state.exchange_rates.get("USD", 4.05)
+        else:
+            rate = 1.0
+
+        shipped_value_pln = 0.0
         for line in order.get("lines", []):
             if line.get("line_status") == "allocated":
                 line["line_status"] = "shipped"
-                line["quantity_shipped"] = line.get("quantity_allocated", 0)
+                shipped_qty: int = line.get("quantity_allocated", 0)
+                line["quantity_shipped"] = shipped_qty
+                shipped_value_pln += shipped_qty * line.get("unit_price", 0.0) * rate
+
+        if customer_id and shipped_value_pln > 0.0:
+            state.customer_balances[customer_id] = (
+                state.customer_balances.get(customer_id, 0.0) + shipped_value_pln
+            )
+
         update_order_status(order)
 
 
