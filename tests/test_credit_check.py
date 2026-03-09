@@ -394,3 +394,116 @@ def test_no_events_when_no_open_orders(state, config):
     # Monday 2026-01-05 is a valid business day
     result = run(state, config, date(2026, 1, 5))
     assert result == [], "Expected empty list when no open orders"
+
+
+# ---------------------------------------------------------------------------
+# Test 9 (Pre-Fix 2): allocated order contributes to exposure
+# ---------------------------------------------------------------------------
+
+
+def test_allocated_order_contributes_to_exposure(state, config):
+    """An order with status='allocated' must count toward the customer's exposure.
+
+    Before Pre-Fix 2, 'allocated' was not in _OPEN_STATUSES, so its value
+    disappeared from the exposure calculation and a new large order could
+    wrongly pass a credit check.
+    """
+    customer = state.customers[0]
+    credit_limit = customer.credit_limit
+    state.customer_balances[customer.customer_id] = 0.0
+
+    # Existing allocated order: 90% of credit limit
+    existing_id = "ORD-TEST-ALLOC-001"
+    existing = _make_order(
+        order_id=existing_id,
+        customer_id=customer.customer_id,
+        currency="PLN",
+        unit_price=credit_limit * 0.90,
+        quantity=1,
+        status="allocated",  # post-allocation status
+    )
+    state.open_orders[existing_id] = existing
+
+    # New confirmed order: 20% of credit limit — combined = 110% → should be held
+    new_id = "ORD-TEST-ALLOC-002"
+    new_order = _make_order(
+        order_id=new_id,
+        customer_id=customer.customer_id,
+        currency="PLN",
+        unit_price=credit_limit * 0.20,
+        quantity=1,
+        status="confirmed",
+    )
+    state.open_orders[new_id] = new_order
+
+    result = run(state, config, date(2026, 1, 5))
+
+    hold_events = [
+        e for e in result
+        if isinstance(e, CreditHoldEvent) and e.order_id == new_id
+    ]
+    assert len(hold_events) == 1, (
+        "New order should be held because allocated order still contributes to exposure"
+    )
+    assert state.open_orders[new_id]["status"] == "credit_hold"
+
+    # Cleanup
+    del state.open_orders[existing_id]
+    del state.open_orders[new_id]
+    state.customer_balances[customer.customer_id] = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Test 10 (Pre-Fix 2): partially_shipped order contributes to exposure
+# ---------------------------------------------------------------------------
+
+
+def test_partially_shipped_order_contributes_to_exposure(state, config):
+    """An order with status='partially_shipped' must count toward exposure.
+
+    Before Pre-Fix 2, 'partially_shipped' was in _SKIP_STATUSES, so its
+    remaining unshipped value was excluded from exposure calculations.
+    """
+    customer = state.customers[0]
+    credit_limit = customer.credit_limit
+    state.customer_balances[customer.customer_id] = 0.0
+
+    # Partially shipped order: 90% of credit limit (still outstanding)
+    partial_id = "ORD-TEST-PSHIP-001"
+    partial = _make_order(
+        order_id=partial_id,
+        customer_id=customer.customer_id,
+        currency="PLN",
+        unit_price=credit_limit * 0.90,
+        quantity=1,
+        status="partially_shipped",  # some shipped, some not yet
+    )
+    state.open_orders[partial_id] = partial
+
+    # New confirmed order: 20% → combined = 110% → should be held
+    new_id = "ORD-TEST-PSHIP-002"
+    new_order = _make_order(
+        order_id=new_id,
+        customer_id=customer.customer_id,
+        currency="PLN",
+        unit_price=credit_limit * 0.20,
+        quantity=1,
+        status="confirmed",
+    )
+    state.open_orders[new_id] = new_order
+
+    result = run(state, config, date(2026, 1, 5))
+
+    hold_events = [
+        e for e in result
+        if isinstance(e, CreditHoldEvent) and e.order_id == new_id
+    ]
+    assert len(hold_events) == 1, (
+        "New order should be held because partially_shipped order contributes to exposure"
+    )
+    assert state.open_orders[new_id]["status"] == "credit_hold"
+
+    # Cleanup
+    del state.open_orders[partial_id]
+    del state.open_orders[new_id]
+    state.customer_balances[customer.customer_id] = 0.0

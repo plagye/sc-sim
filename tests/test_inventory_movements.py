@@ -420,3 +420,73 @@ def test_receipt_batch_ids_match_production(config, tmp_path: Path):
     assert actual_batches == set(expected_batches), (
         f"Receipt batch IDs {actual_batches} do not match expected {set(expected_batches)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 11 (Pre-Fix 6): adjustment does not go negative after stale transfer
+# ---------------------------------------------------------------------------
+
+
+def test_adjustment_no_negative_after_transfer(config, tmp_path: Path):
+    """After a transfer depletes a SKU, adjustments must not go negative.
+
+    This is the regression test for the stale on_hand snapshot bug:
+    _generate_adjustments() previously captured on_hand at snapshot time,
+    then used that stale value when computing the adjustment — potentially
+    causing negative inventory if a transfer had already depleted the SKU.
+    """
+    from flowform.engines import inventory_movements as mod
+
+    cfg = load_config(Path("/home/coder/sc-sim/config.yaml"))
+    st = SimulationState.from_new(cfg, db_path=tmp_path / "sim_adj_neg.db")
+
+    # Pick a SKU, set tiny stock so a transfer will likely deplete it
+    sku = st.catalog[0].sku
+    st.inventory["W01"][sku] = 1
+
+    # Force transfer + adjustment both to run
+    orig_transfer = mod._TRANSFER_PROB
+    orig_adjust = mod._ADJUSTMENT_PROB
+    mod._TRANSFER_PROB = 1.0
+    mod._ADJUSTMENT_PROB = 1.0
+    try:
+        mod._generate_transfers(st, _BUSINESS_DAY)
+        mod._generate_adjustments(st, _BUSINESS_DAY)
+    finally:
+        mod._TRANSFER_PROB = orig_transfer
+        mod._ADJUSTMENT_PROB = orig_adjust
+
+    # No warehouse/SKU should ever go negative
+    for wh_code, wh_inv in st.inventory.items():
+        for sku_key, qty in wh_inv.items():
+            assert qty >= 0, f"Negative inventory at {wh_code}/{sku_key}: {qty}"
+
+
+# ---------------------------------------------------------------------------
+# Test 12 (Pre-Fix 16): inventory never negative across 5 business days
+# ---------------------------------------------------------------------------
+
+
+def test_inventory_never_negative(config, tmp_path: Path):
+    """Run all inventory-mutating engines for 5 business days.
+    Assert no warehouse/SKU has stock < 0.
+    """
+    from flowform.engines import inventory_movements, transfers
+
+    cfg = load_config(Path("/home/coder/sc-sim/config.yaml"))
+    st = SimulationState.from_new(cfg, db_path=tmp_path / "sim_inv_non_neg.db")
+
+    biz_days = [
+        date(2026, 1, 5),
+        date(2026, 1, 7),
+        date(2026, 1, 8),
+        date(2026, 1, 9),
+        date(2026, 1, 12),
+    ]
+    for d in biz_days:
+        inventory_movements.run(st, cfg, d)
+        transfers.run(st, cfg, d)
+
+    for wh, inv in st.inventory.items():
+        for sku, qty in inv.items():
+            assert qty >= 0, f"Negative inventory: {wh}/{sku} = {qty}"

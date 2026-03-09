@@ -448,6 +448,9 @@ def _apply_line_removal(
     order_id: str = order.get("order_id", "")
     _return_allocated_to_inventory(state, target, sim_date, order_id, unpick_events)
 
+    # Remove from state.allocated tracking
+    state.allocated.get(order_id, {}).pop(target.get("line_id", ""), None)
+
     # Cancel the line
     old_qty = target.get("quantity_ordered", 0)
     target["line_status"] = "cancelled"

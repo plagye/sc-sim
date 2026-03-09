@@ -28,11 +28,22 @@ from flowform.state import SimulationState
 # Event schemas
 # ---------------------------------------------------------------------------
 
-# Statuses that represent "open" orders for exposure purposes
-_OPEN_STATUSES: frozenset[str] = frozenset({"confirmed", "credit_hold"})
+# Statuses that represent "open" orders for exposure purposes.
+# Includes post-allocation statuses because a picked/backordered order still
+# has financial exposure — goods are committed and not yet invoiced separately.
+_OPEN_STATUSES: frozenset[str] = frozenset({
+    "confirmed",
+    "credit_hold",
+    "allocated",
+    "partially_allocated",
+    "backordered",
+    "partially_shipped",  # unshipped portion still represents real exposure
+})
 
-# Statuses to skip entirely (nothing to evaluate or release)
-_SKIP_STATUSES: frozenset[str] = frozenset({"shipped", "cancelled", "partially_shipped"})
+# Statuses to skip entirely (terminal — no remaining financial exposure).
+# Note: partially_shipped is intentionally NOT here; the unshipped portion
+# of a partially-shipped order still represents real financial exposure.
+_SKIP_STATUSES: frozenset[str] = frozenset({"shipped", "cancelled"})
 
 
 class CreditHoldEvent(BaseModel):

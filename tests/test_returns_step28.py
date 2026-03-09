@@ -235,7 +235,7 @@ def test_no_second_rma_for_same_order(state, config):
 
 def test_in_transit_return_advancement(state, config):
     """An RMA in return_requested status created yesterday must advance to
-    in_transit_return today."""
+    return_authorized today (first step of the new lifecycle)."""
     yesterday = _BIZ_DAY - timedelta(days=1)
     rma = {
         "rma_id": "RMA-5000",
@@ -261,6 +261,100 @@ def test_in_transit_return_advancement(state, config):
 
     events = returns.run(state, config, _BIZ_DAY)
 
+    # After pre-fix 10, return_requested → return_authorized (not directly in_transit_return)
+    authorized_events = [
+        e for e in events
+        if isinstance(e, ReturnEvent) and e.event_subtype == "return_authorized"
+    ]
+    assert len(authorized_events) == 1, (
+        f"Expected 1 return_authorized event, got {len(authorized_events)}"
+    )
+
+    # RMA dict must be updated to return_authorized
+    assert rma["rma_status"] == "return_authorized"
+    assert rma.get("authorized_date") is not None
+
+
+# ---------------------------------------------------------------------------
+# Pre-Fix 10: return_authorized → pickup_scheduled stage test
+# ---------------------------------------------------------------------------
+
+
+def test_return_authorized_advances_to_pickup_scheduled(state, config):
+    """An RMA in return_authorized status authorized yesterday must advance to
+    pickup_scheduled today."""
+    yesterday = _BIZ_DAY - timedelta(days=1)
+    rma = {
+        "rma_id": "RMA-AUTH-001",
+        "order_id": "ORD-AUTH-001",
+        "customer_id": state.customers[0].customer_id,
+        "carrier_code": "DHL",
+        "return_warehouse_id": "W01",
+        "rma_status": "return_authorized",
+        "created_date": (yesterday - timedelta(days=1)).isoformat(),
+        "authorized_date": yesterday.isoformat(),
+        "transit_due_date": None,
+        "lines": [
+            {
+                "line_number": 1,
+                "sku": _any_sku(state),
+                "quantity_returned": 3,
+                "quantity_accepted": None,
+                "return_reason": "wrong_item_shipped",
+            }
+        ],
+        "resolution": None,
+    }
+    state.in_transit_returns.append(rma)
+
+    events = returns.run(state, config, _BIZ_DAY)
+
+    pickup_events = [
+        e for e in events
+        if isinstance(e, ReturnEvent) and e.event_subtype == "pickup_scheduled"
+    ]
+    assert len(pickup_events) == 1, (
+        f"Expected 1 pickup_scheduled event, got {len(pickup_events)}"
+    )
+    assert rma["rma_status"] == "pickup_scheduled"
+    assert rma.get("pickup_scheduled_date") is not None
+
+
+# ---------------------------------------------------------------------------
+# Pre-Fix 10: pickup_scheduled → in_transit_return stage test
+# ---------------------------------------------------------------------------
+
+
+def test_pickup_scheduled_advances_to_in_transit(state, config):
+    """An RMA in pickup_scheduled status scheduled yesterday must advance to
+    in_transit_return today with a transit_due_date set."""
+    yesterday = _BIZ_DAY - timedelta(days=1)
+    rma = {
+        "rma_id": "RMA-PICKUP-001",
+        "order_id": "ORD-PICKUP-001",
+        "customer_id": state.customers[0].customer_id,
+        "carrier_code": "DHL",
+        "return_warehouse_id": "W01",
+        "rma_status": "pickup_scheduled",
+        "created_date": (yesterday - timedelta(days=2)).isoformat(),
+        "authorized_date": (yesterday - timedelta(days=1)).isoformat(),
+        "pickup_scheduled_date": yesterday.isoformat(),
+        "transit_due_date": None,
+        "lines": [
+            {
+                "line_number": 1,
+                "sku": _any_sku(state),
+                "quantity_returned": 2,
+                "quantity_accepted": None,
+                "return_reason": "damaged_in_transit",
+            }
+        ],
+        "resolution": None,
+    }
+    state.in_transit_returns.append(rma)
+
+    events = returns.run(state, config, _BIZ_DAY)
+
     transit_events = [
         e for e in events
         if isinstance(e, ReturnEvent) and e.event_subtype == "in_transit_return"
@@ -268,11 +362,8 @@ def test_in_transit_return_advancement(state, config):
     assert len(transit_events) == 1, (
         f"Expected 1 in_transit_return event, got {len(transit_events)}"
     )
-
-    # RMA dict must be updated
     assert rma["rma_status"] == "in_transit_return"
-    assert rma["transit_due_date"] is not None
-    # transit_due_date must be at least 2 calendar days from sim_date
+    assert rma.get("transit_due_date") is not None
     transit_due = date.fromisoformat(rma["transit_due_date"])
     assert transit_due >= _BIZ_DAY + timedelta(days=2)
 
@@ -356,11 +447,10 @@ def test_inspected_and_restocked(state, config):
     }
     state.in_transit_returns.append(rma)
 
-    # Seed RNG so the 80% roll fires (first random() call in _advance_rma for
-    # the inspection outcome must be < 0.80)
+    # Seed RNG so the inspection roll lands in the Grade-A range (< 0.60 → W01 restock)
     for seed in range(10000):
         state.rng = random.Random(seed)
-        if state.rng.random() < 0.80:
+        if state.rng.random() < 0.60:
             state.rng = random.Random(seed)
             break
 
@@ -375,8 +465,12 @@ def test_inspected_and_restocked(state, config):
     assert len(restock_events) >= 1, (
         "Expected at least one return_restock InventoryMovementEvent"
     )
+    # Grade-A restock goes to W01; reference_id encodes the grade
+    assert any(e.reference_id == "GRADE-A" for e in restock_events), (
+        "Expected GRADE-A reference on restock movement when roll < 0.60"
+    )
 
-    # Inventory must have increased
+    # Inventory must have increased in W01 (Grade-A)
     new_qty = state.inventory.get("W01", {}).get(sku, 0)
     assert new_qty == initial_qty + qty_returned, (
         f"Expected W01[{sku}] = {initial_qty + qty_returned}, got {new_qty}"
@@ -418,10 +512,10 @@ def test_inspected_and_scrapped(state, config):
     }
     state.in_transit_returns.append(rma)
 
-    # Seed RNG so the 80% roll fails (random() >= 0.80 → scrap)
+    # Seed RNG so the inspection roll falls in the scrap range (random() >= 0.85 → scrap)
     for seed in range(10000):
         state.rng = random.Random(seed)
-        if state.rng.random() >= 0.80:
+        if state.rng.random() >= 0.85:
             state.rng = random.Random(seed)
             break
 
@@ -538,6 +632,70 @@ def test_no_return_from_cancelled_order(state, config):
     ]
     assert req_events == [], (
         "Cancelled orders must not generate return_requested events"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pre-Fix 9: Grade-B restock goes to W02
+# ---------------------------------------------------------------------------
+
+
+def test_inspected_and_restocked_grade_b(state, config):
+    """A received_at_warehouse RMA with inspection roll in [0.60, 0.85) must
+    emit resolution='restocked' with GRADE-B reference and update W02 inventory."""
+    sku = _any_sku(state)
+    initial_w02_qty = state.inventory.get("W02", {}).get(sku, 0)
+    qty_returned = 4
+
+    yesterday = _BIZ_DAY - timedelta(days=1)
+    rma = {
+        "rma_id": "RMA-GRADEB-001",
+        "order_id": "ORD-GRADEB-001",
+        "customer_id": state.customers[0].customer_id,
+        "carrier_code": "DHL",
+        "return_warehouse_id": "W01",
+        "rma_status": "received_at_warehouse",
+        "created_date": (yesterday - timedelta(days=2)).isoformat(),
+        "transit_due_date": yesterday.isoformat(),
+        "received_date": yesterday.isoformat(),
+        "lines": [
+            {
+                "line_number": 1,
+                "sku": sku,
+                "quantity_returned": qty_returned,
+                "quantity_accepted": None,
+                "return_reason": "overstock",
+            }
+        ],
+        "resolution": None,
+    }
+    state.in_transit_returns.append(rma)
+
+    # Seed RNG so the inspection roll lands in the Grade-B range [0.60, 0.85)
+    for seed in range(10000):
+        state.rng = random.Random(seed)
+        roll = state.rng.random()
+        if 0.60 <= roll < 0.85:
+            state.rng = random.Random(seed)
+            break
+
+    events = returns.run(state, config, _BIZ_DAY)
+
+    restock_events = [e for e in events if isinstance(e, InventoryMovementEvent) and e.movement_type == "return_restock"]
+
+    assert len(restock_events) >= 1, "Expected at least one return_restock event for Grade-B"
+    assert any(e.reference_id == "GRADE-B" for e in restock_events), (
+        "Expected GRADE-B reference on restock movement when 0.60 <= roll < 0.85"
+    )
+    # Grade-B restocked to W02
+    assert any(e.warehouse_id == "W02" for e in restock_events), (
+        "Expected Grade-B restock to go to W02"
+    )
+
+    # W02 inventory must have increased
+    new_w02_qty = state.inventory.get("W02", {}).get(sku, 0)
+    assert new_w02_qty == initial_w02_qty + qty_returned, (
+        f"Expected W02[{sku}] = {initial_w02_qty + qty_returned}, got {new_w02_qty}"
     )
 
 

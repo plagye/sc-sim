@@ -62,10 +62,7 @@ def _make_transfer_event(
     Returns:
         A fully populated :class:`InventoryMovementEvent`.
     """
-    if "movement" not in state.counters:
-        state.counters["movement"] = 1000
-    state.counters["movement"] += 1
-    movement_id = f"MOV-{state.counters['movement']}"
+    movement_id = state.next_movement_id()
 
     return InventoryMovementEvent(
         event_id=str(uuid.uuid4()),
@@ -85,7 +82,10 @@ def _make_transfer_event(
     )
 
 
-def _find_eligible_skus(state: SimulationState) -> list[tuple[str, int]]:
+def _find_eligible_skus(
+    state: SimulationState,
+    threshold_pct: float = _REPLENISHMENT_THRESHOLD,
+) -> list[tuple[str, int]]:
     """Identify SKUs where W02 is below the replenishment threshold.
 
     Only SKUs that W02 already carries (i.e. present in
@@ -93,7 +93,10 @@ def _find_eligible_skus(state: SimulationState) -> list[tuple[str, int]]:
     positive stock.
 
     Args:
-        state: Current simulation state.
+        state:         Current simulation state.
+        threshold_pct: Fraction of W01 on-hand below which W02 is eligible
+                       for replenishment.  Defaults to the module constant;
+                       at runtime this is sourced from config.
 
     Returns:
         Sorted list of ``(sku, transfer_qty)`` tuples for all eligible SKUs,
@@ -109,7 +112,7 @@ def _find_eligible_skus(state: SimulationState) -> list[tuple[str, int]]:
         if w01_qty <= 0:
             continue  # no source stock
 
-        threshold = math.ceil(_REPLENISHMENT_THRESHOLD * w01_qty)
+        threshold = math.ceil(threshold_pct * w01_qty)
         if w02_qty >= threshold:
             continue  # W02 adequately stocked
 
@@ -163,7 +166,13 @@ def run(
     if state.rng.random() >= _REPLENISHMENT_PROB:
         return []
 
-    eligible = _find_eligible_skus(state)
+    # Read threshold from config; fall back to module constant if not set
+    threshold_pct = getattr(
+        getattr(config, "company", None), "warehouse_transfer_threshold",
+        _REPLENISHMENT_THRESHOLD,
+    )
+
+    eligible = _find_eligible_skus(state, threshold_pct=threshold_pct)
     if not eligible:
         return []
 

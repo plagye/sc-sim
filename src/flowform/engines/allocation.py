@@ -220,6 +220,9 @@ def _run_escalation(
                         line["quantity_backordered"] = 0
                         line["line_status"] = "cancelled"
 
+                        # Remove from state.allocated tracking
+                        state.allocated.get(order_id, {}).pop(line["line_id"], None)
+
                         events.append(
                             BackorderCancellationEvent(
                                 event_id=str(uuid.uuid4()),
@@ -402,6 +405,9 @@ def _run_allocation(
             line["backorder_days"] = 0
             line["line_status"] = "allocated"
 
+            # Record in state.allocated for credit exposure tracking
+            state.allocated.setdefault(order_id, {})[line["line_id"]] = line["quantity_allocated"]
+
             events.append(
                 _make_event(
                     state,
@@ -427,6 +433,9 @@ def _run_allocation(
             line["line_status"] = "partially_allocated"
             if "backorder_days" not in line:
                 line["backorder_days"] = 0
+
+            # Record partial allocation in state.allocated
+            state.allocated.setdefault(order_id, {})[line["line_id"]] = line["quantity_allocated"]
 
             events.append(
                 _make_event(

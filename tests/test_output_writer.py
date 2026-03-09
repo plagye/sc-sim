@@ -384,3 +384,48 @@ def test_date_objects_serialised_as_strings(tmp_path: Path) -> None:
     )
     assert data[0]["as_of_date"] == "2026-03-05"
     assert "2026-03-05" in data[0]["recorded_at"]
+
+
+# ---------------------------------------------------------------------------
+# Pre-Fix 8: backorder and backorder_cancellation event routing
+# ---------------------------------------------------------------------------
+
+
+def test_backorder_event_routes_to_erp_file(tmp_path: Path) -> None:
+    """A 'backorder' event_type must route to ERP/backorder_events_{date}.json."""
+    event = _erp("backorder", order_id="O001", order_line_id="L001", sku="FF-GA15-CS-PN16-FL-MN")
+    written = write_events([event], _SIM_DATE, output_dir=tmp_path)
+
+    expected = tmp_path / "erp" / _DATE_STR / "backorder_events.json"
+    assert len(written) == 1
+    assert written[0] == expected
+    assert expected.exists()
+
+    data = json.loads(expected.read_text())
+    assert isinstance(data, list)
+    assert len(data) == 1
+
+
+def test_backorder_cancellation_event_routes_to_erp_file(tmp_path: Path) -> None:
+    """A 'backorder_cancellation' event_type must route to ERP/backorder_cancellation_events_{date}.json."""
+    event = _erp("backorder_cancellation", order_id="O002", order_line_id="L002")
+    written = write_events([event], _SIM_DATE, output_dir=tmp_path)
+
+    expected = tmp_path / "erp" / _DATE_STR / "backorder_cancellation_events.json"
+    assert len(written) == 1
+    assert written[0] == expected
+    assert expected.exists()
+
+
+def test_zero_backorder_events_writes_no_file(tmp_path: Path) -> None:
+    """When no backorder events are present, no backorder file should be written."""
+    events = [_erp("exchange_rate", EUR=4.30)]
+    write_events(events, _SIM_DATE, output_dir=tmp_path)
+
+    erp_dir = tmp_path / "erp" / _DATE_STR
+    if erp_dir.exists():
+        files = list(erp_dir.iterdir())
+        file_names = {f.name for f in files}
+        assert "backorder_events.json" not in file_names, (
+            "backorder_events.json should not exist when no backorder events were passed"
+        )

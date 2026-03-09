@@ -433,3 +433,47 @@ def test_terminal_status_loads_skipped(state, config):
 
     assert events == []
     assert state.active_loads["LOAD-9001"]["status"] == "delivered"
+
+
+# ---------------------------------------------------------------------------
+# Pre-Fix 12: delivered load awaiting POD must not be re-advanced
+# ---------------------------------------------------------------------------
+
+
+def test_delivered_load_awaiting_pod_not_re_advanced(state, config):
+    """A load that reached 'delivered' status (and is in pending_pod) must
+    remain at 'delivered' for subsequent load_lifecycle.run() calls.
+
+    This verifies that the pod.py engine — not load_lifecycle — is responsible
+    for removing the load from active_loads after POD fires.
+    """
+    load = _make_load(state, status="delivered")
+    load["actual_arrival"] = _BIZ_DAY.isoformat()
+
+    # Simulate load being added to pending_pod (as the lifecycle engine does on delivery)
+    state.pending_pod["LOAD-9001"] = {
+        "load_id": "LOAD-9001",
+        "carrier_code": load["carrier_code"],
+        "source_warehouse_id": load["source_warehouse_id"],
+        "shipment_ids": load["shipment_ids"],
+        "order_ids": load["order_ids"],
+        "total_weight_kg": load["total_weight_kg"],
+        "weight_unit": load["weight_unit"],
+        "total_weight_reported": load["total_weight_reported"],
+        "sync_window": load["sync_window"],
+        "priority": load["priority"],
+        "customer_ids": load["customer_ids"],
+        "planned_date": load["planned_date"],
+        "delivery_date": _BIZ_DAY.isoformat(),
+        "pod_due_date": (_BIZ_DAY + timedelta(days=3)).isoformat(),
+    }
+
+    # Run load_lifecycle for 2 more days — load must stay at "delivered"
+    day2 = _BIZ_DAY + timedelta(days=1)
+    day3 = _BIZ_DAY + timedelta(days=2)
+    for d in [day2, day3]:
+        events = load_lifecycle.run(state, config, d)
+        assert events == [], f"Expected no events for delivered load on {d}, got {events}"
+        assert state.active_loads["LOAD-9001"]["status"] == "delivered", (
+            f"Load should remain 'delivered' on {d}, not advance further"
+        )

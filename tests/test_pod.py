@@ -305,3 +305,66 @@ def test_load_lifecycle_delivery_populates_pending_pod(state, config):
     pod_due = date.fromisoformat(pod_rec["pod_due_date"])
     # pod_due_date must be strictly after sim_date (at least 1 biz day later)
     assert pod_due > _BIZ_DAY
+
+
+# ---------------------------------------------------------------------------
+# Pre-Fix 13: pod_due_date stored as ISO string; pod.run() processes without error
+# ---------------------------------------------------------------------------
+
+
+def test_pod_due_date_stored_as_iso_string_and_processed_correctly(state, config):
+    """Verify that load_lifecycle stores pod_due_date as an ISO string (not a
+    date object) and that pod.run() can parse and fire without exceptions.
+
+    This is the regression test for the type mismatch that would cause
+    ValueError in pod.py if pod_due_date were stored as a date object.
+    """
+    ofd_date = _BIZ_DAY - timedelta(days=3)
+    load: dict[str, Any] = {
+        "load_id": "LOAD-PREFIX13-001",
+        "status": "out_for_delivery",
+        "carrier_code": "DHL",
+        "source_warehouse_id": "W01",
+        "planned_date": ofd_date.isoformat(),
+        "estimated_departure": ofd_date.isoformat(),
+        "estimated_arrival": ofd_date.isoformat(),
+        "actual_departure": ofd_date.isoformat(),
+        "actual_arrival": None,
+        "delay_days": 0,
+        "shipment_ids": ["SHP-P13-001"],
+        "order_ids": [],
+        "total_weight_kg": 30.0,
+        "weight_unit": "kg",
+        "total_weight_reported": 30.0,
+        "sync_window": "14",
+        "priority": "standard",
+        "customer_ids": ["CUST-0001"],
+        "events": [],
+        "out_for_delivery_date": ofd_date.isoformat(),
+        "delivery_window": 1,
+    }
+    state.active_loads["LOAD-PREFIX13-001"] = load
+
+    _RELIABILITY_PATCH = "flowform.engines.load_lifecycle._carrier_reliability"
+
+    # Step 1: load_lifecycle delivers the load
+    with patch(_RELIABILITY_PATCH, return_value=1.0):
+        load_lifecycle.run(state, config, _BIZ_DAY)
+
+    assert "LOAD-PREFIX13-001" in state.pending_pod, "Load must appear in pending_pod"
+
+    # Step 2: Assert pod_due_date is a string (not a date object)
+    pod_rec = state.pending_pod["LOAD-PREFIX13-001"]
+    assert isinstance(pod_rec["pod_due_date"], str), (
+        f"pod_due_date must be an ISO string, got {type(pod_rec['pod_due_date'])}"
+    )
+    # Must be parseable as an ISO date
+    pod_due = date.fromisoformat(pod_rec["pod_due_date"])
+
+    # Step 3: Advance to pod_due_date and run pod.run() — must not raise
+    events = pod.run(state, config, pod_due)
+
+    assert len(events) == 1
+    assert events[0].event_subtype == "pod_received"
+    assert "LOAD-PREFIX13-001" not in state.pending_pod
+    assert "LOAD-PREFIX13-001" not in state.active_loads

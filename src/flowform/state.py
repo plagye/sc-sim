@@ -379,6 +379,21 @@ class SimulationState:
         self.counters[counter_name] += 1
         return self.counters[counter_name]
 
+    def next_movement_id(self) -> str:
+        """Allocate and return the next MOV-NNN movement ID.
+
+        Initialises the ``"movement"`` counter to 1000 on first call (matching
+        the behaviour previously duplicated in ``inventory_movements.py`` and
+        ``transfers.py``).
+
+        Returns:
+            A string of the form ``"MOV-{N}"`` where N is the new counter value.
+        """
+        if "movement" not in self.counters:
+            self.counters["movement"] = 1000
+        self.counters["movement"] += 1
+        return f"MOV-{self.counters['movement']}"
+
     # ------------------------------------------------------------------
     # Internal: schema creation
     # ------------------------------------------------------------------

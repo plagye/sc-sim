@@ -39,8 +39,11 @@ _RETURN_REASONS: list[tuple[float, str]] = [
     (1.00, "specification_mismatch"),
 ]
 
-# Inspection outcome: 80% restocked, 20% scrapped
-_RESTOCK_PROB: float = 0.80
+# Inspection outcome per blueprint: 60% Grade-A restock, 25% Grade-B restock, 15% scrap.
+# (Total restock = 85%, total scrap = 15%)
+_A_RESTOCK_PROB: float = 0.60
+_B_RESTOCK_PROB: float = 0.25   # cumulative 0.85 → scrap if rng >= 0.85
+_SCRAP_PROB_THRESH: float = 0.85  # rng >= this → scrap
 
 
 # ---------------------------------------------------------------------------
@@ -127,16 +130,21 @@ def _make_restock_movement(
     sim_date: date,
     rma: dict[str, Any],
     line: dict[str, Any],
+    grade: str,
 ) -> InventoryMovementEvent:
     """Build a return_restock :class:`InventoryMovementEvent` for one RMA line.
 
-    Also updates ``state.inventory["W01"]`` for the SKU in place.
+    Grade-A items are restocked to W01 (primary warehouse, full price value).
+    Grade-B items are restocked to W02 (port warehouse, discounted/secondary stock).
+
+    Also updates ``state.inventory`` for the appropriate warehouse in place.
 
     Args:
         state:    Mutable simulation state.
         sim_date: The simulation date.
         rma:      The RMA state dict.
         line:     One returned line sub-dict (must have quantity_accepted set).
+        grade:    "A" or "B" — determines which warehouse receives the stock.
 
     Returns:
         An :class:`InventoryMovementEvent` with movement_type="return_restock".
@@ -144,19 +152,19 @@ def _make_restock_movement(
     sku = line["sku"]
     qty = line["quantity_accepted"]
 
-    # Update W01 inventory
-    w01 = state.inventory.setdefault("W01", {})
-    w01[sku] = w01.get(sku, 0) + qty
+    # Grade-A restocked to primary warehouse W01; Grade-B to W02 (secondary/port stock)
+    warehouse_id = "W01" if grade == "A" else "W02"
+    wh = state.inventory.setdefault(warehouse_id, {})
+    wh[sku] = wh.get(sku, 0) + qty
 
-    state.counters["movement"] = state.counters.get("movement", 1000) + 1
-    movement_id = f"MOV-{state.counters['movement']}"
+    movement_id = state.next_movement_id()
 
     return InventoryMovementEvent(
         event_id=str(uuid.uuid4()),
         movement_id=movement_id,
         movement_type="return_restock",
         movement_date=sim_date.isoformat(),
-        warehouse_id="W01",
+        warehouse_id=warehouse_id,
         destination_warehouse_id=None,
         sku=sku,
         quantity=qty,
@@ -165,7 +173,7 @@ def _make_restock_movement(
         order_line_id=None,
         production_batch_id=None,
         reason_code=None,
-        reference_id=rma["rma_id"],
+        reference_id=f"GRADE-{grade}",
     )
 
 
@@ -233,12 +241,42 @@ def _advance_rma(
     status = rma["rma_status"]
 
     # ----------------------------------------------------------------
-    # return_requested → in_transit_return
+    # return_requested → return_authorized
     # Next business day after creation (created_date < sim_date)
     # ----------------------------------------------------------------
     if status == "return_requested":
         created = date.fromisoformat(rma["created_date"])
         if sim_date > created:
+            rma["rma_status"] = "return_authorized"
+            rma["authorized_date"] = sim_date.isoformat()
+            events.append(_make_return_event(rma, sim_date))
+        return events
+
+    # ----------------------------------------------------------------
+    # return_authorized → pickup_scheduled
+    # Next business day after authorization
+    # ----------------------------------------------------------------
+    if status == "return_authorized":
+        authorized_str = rma.get("authorized_date")
+        if authorized_str is None:
+            return events
+        authorized = date.fromisoformat(authorized_str)
+        if sim_date > authorized:
+            rma["rma_status"] = "pickup_scheduled"
+            rma["pickup_scheduled_date"] = sim_date.isoformat()
+            events.append(_make_return_event(rma, sim_date))
+        return events
+
+    # ----------------------------------------------------------------
+    # pickup_scheduled → in_transit_return
+    # Next business day after pickup scheduled
+    # ----------------------------------------------------------------
+    if status == "pickup_scheduled":
+        pickup_str = rma.get("pickup_scheduled_date")
+        if pickup_str is None:
+            return events
+        pickup = date.fromisoformat(pickup_str)
+        if sim_date > pickup:
             # Calculate transit due date
             transit_days = state.rng.randint(2, 5)
             transit_due = sim_date + timedelta(days=transit_days)
@@ -278,16 +316,29 @@ def _advance_rma(
                 line["quantity_accepted"] = line["quantity_returned"]
             rma["rma_status"] = "inspected"
 
-            # Roll for resolution on the same day
-            if state.rng.random() < _RESTOCK_PROB:
+            # Roll for inspection outcome:
+            # [0, 0.60) → Grade-A restock
+            # [0.60, 0.85) → Grade-B restock
+            # [0.85, 1.0) → scrap
+            roll = state.rng.random()
+            if roll < _A_RESTOCK_PROB:
+                grade = "A"
                 resolution = "restocked"
                 rma["resolution"] = resolution
                 rma["rma_status"] = "restocked"
                 events.append(_make_return_event(rma, sim_date, resolution=resolution))
-                # Emit inventory movement per line
                 for line in rma["lines"]:
-                    events.append(_make_restock_movement(state, sim_date, rma, line))
+                    events.append(_make_restock_movement(state, sim_date, rma, line, grade=grade))
+            elif roll < _SCRAP_PROB_THRESH:
+                grade = "B"
+                resolution = "restocked"
+                rma["resolution"] = resolution
+                rma["rma_status"] = "restocked"
+                events.append(_make_return_event(rma, sim_date, resolution=resolution))
+                for line in rma["lines"]:
+                    events.append(_make_restock_movement(state, sim_date, rma, line, grade=grade))
             else:
+                # Scrapped — no inventory movement
                 resolution = "scrapped"
                 rma["resolution"] = resolution
                 rma["rma_status"] = "scrapped"

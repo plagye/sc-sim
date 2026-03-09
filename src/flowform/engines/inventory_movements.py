@@ -131,10 +131,7 @@ def _make_event(
 
     Allocates a new ``movement_id`` from the state counters.
     """
-    if "movement" not in state.counters:
-        state.counters["movement"] = 1000
-    state.counters["movement"] += 1
-    movement_id = f"MOV-{state.counters['movement']}"
+    movement_id = state.next_movement_id()
 
     return InventoryMovementEvent(
         event_id=str(uuid.uuid4()),
@@ -251,6 +248,7 @@ def _generate_transfers(
                 quantity=qty,
                 quantity_direction="out",
                 destination_warehouse_id=dst,
+                reason_code="adhoc_transfer",
             )
         )
         # Emit inbound leg (destination)
@@ -264,6 +262,7 @@ def _generate_transfers(
                 quantity=qty,
                 quantity_direction="in",
                 destination_warehouse_id=None,
+                reason_code="adhoc_transfer",
                 reference_id=src,
             )
         )
@@ -306,17 +305,22 @@ def _generate_adjustments(
 
     chosen = state.rng.sample(candidates, min(n_skus, len(candidates)))
 
-    for wh_code, sku, on_hand in chosen:
-        max_delta = max(1, int(on_hand * _ADJUSTMENT_MAX_FRACTION))
+    for wh_code, sku, _stale_on_hand in chosen:
+        # Re-read live on-hand to avoid using a snapshot that may be stale
+        # if _generate_transfers() already mutated inventory for this SKU.
+        current_on_hand = state.inventory[wh_code].get(sku, 0)
+        if current_on_hand == 0:
+            continue  # stock depleted by an earlier transfer this same day
+        max_delta = max(1, int(current_on_hand * _ADJUSTMENT_MAX_FRACTION))
         delta = state.rng.randint(1, max(1, max_delta))
         # Randomly increase or decrease; never go negative
         if state.rng.random() < 0.5:
             direction: Literal["in", "out"] = "in"
-            state.inventory[wh_code][sku] = on_hand + delta
+            state.inventory[wh_code][sku] = current_on_hand + delta
         else:
             direction = "out"
-            actual_delta = min(delta, on_hand)
-            state.inventory[wh_code][sku] = on_hand - actual_delta
+            actual_delta = min(delta, current_on_hand)
+            state.inventory[wh_code][sku] = current_on_hand - actual_delta
             delta = actual_delta
 
         reason = state.rng.choice(_ADJUST_REASONS)

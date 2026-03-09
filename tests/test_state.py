@@ -343,6 +343,26 @@ def test_next_id_increments(config, db_path):
 # ---------------------------------------------------------------------------
 
 
+def test_next_movement_id_increments(config, db_path):
+    """next_movement_id() must return strictly increasing MOV-NNN strings."""
+    state = SimulationState.from_new(config, db_path=db_path)
+
+    first = state.next_movement_id()
+    second = state.next_movement_id()
+
+    # Both must start with "MOV-"
+    assert first.startswith("MOV-")
+    assert second.startswith("MOV-")
+
+    first_num = int(first.split("-")[1])
+    second_num = int(second.split("-")[1])
+
+    # Second call must be exactly 1 higher than first
+    assert second_num == first_num + 1, (
+        f"Expected second movement ID to be {first_num + 1}, got {second_num}"
+    )
+
+
 def test_production_pipeline_roundtrip(config, db_path):
     state = SimulationState.from_new(config, db_path=db_path)
 

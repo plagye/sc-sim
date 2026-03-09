@@ -80,6 +80,7 @@ def _run_day_loop(
         load_planning,
         modifications,
         orders,
+        payments,
         pod,
         production,
         returns,
@@ -132,10 +133,13 @@ def _run_day_loop(
     # Step 11: Returns / RMA flow (self-guards to business days)
     all_events.extend(returns.run(state, config, sim_date))  # type: ignore[arg-type]
 
-    # Step 13: Inter-warehouse transfers — demand-pull replenishment W01→W02
+    # Step 12: Payment processing — stub returns [], safe to call (business days only)
+    all_events.extend(payments.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Step 13: Inter-warehouse replenishment transfers (business days only)
     all_events.extend(transfers.run(state, config, sim_date))  # type: ignore[arg-type]
 
-    # Steps 12, 14–16: TODO (payments, demand planning, master data, snapshots)
+    # Steps 14–16: TODO (demand planning, master data, snapshots)
 
     # Step 17: Schema evolution — TODO
     # Step 18: Noise injection — TODO
@@ -207,9 +211,9 @@ def _cmd_status() -> None:
 def _simulate_days(config: object, n_days: int) -> None:  # type: ignore[type-arg]
     """Shared helper: simulate *n_days* **calendar** days and persist state.
 
-    Advances one calendar day at a time.  Weekend and holiday days are still
-    processed (exchange rates run 7 days a week; weekend EDI orders arrive from
-    Distributors).  Engines that are business-day-only self-guard internally.
+    Advance the simulation by N **calendar** days.
+    Weekend and holiday days are included; each engine self-guards for
+    business-day logic.
 
     Args:
         config: Validated simulation config.
@@ -236,7 +240,7 @@ def _simulate_days(config: object, n_days: int) -> None:  # type: ignore[type-ar
 
 
 def _cmd_days(config: object, n: int) -> None:  # type: ignore[type-arg]
-    """--days N: simulate N business days."""
+    """--days N: simulate N calendar days."""
     _simulate_days(config, n)
 
 
@@ -291,7 +295,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--days",
         type=int,
         metavar="N",
-        help="Simulate N business days from the current simulation date.",
+        help="Simulate N calendar days from the current simulation date (weekends and holidays included; engines self-guard for business-day logic).",
     )
     group.add_argument(
         "--until",

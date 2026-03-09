@@ -363,3 +363,34 @@ def test_open_orders_state_updated(state, config):
         assert stored["priority"] == event.priority
         assert "lines" in stored
         assert len(stored["lines"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# Pre-Fix 14: order ID format is ORD-{YYYY}-{NNNNNN}
+# ---------------------------------------------------------------------------
+
+
+def test_order_id_format_includes_year(state, config):
+    """Order IDs must follow the format ORD-{year}-{6-digit-zero-padded-number}.
+
+    The year component partitions orders by year for DE consumers.
+    Example: ORD-2026-001001
+    """
+    import re
+
+    sim_date = _MONDAY  # business day in 2026
+    events = run(state, config, sim_date)
+
+    if not events:
+        pytest.skip("No orders generated on this day — probabilistic; skip")
+
+    pattern = re.compile(r"^ORD-\d{4}-\d{6}$")
+    for event in events:
+        assert pattern.match(event.order_id), (
+            f"Order ID '{event.order_id}' does not match format ORD-YYYY-NNNNNN"
+        )
+        # Year must match the simulation date year
+        year_in_id = int(event.order_id.split("-")[1])
+        assert year_in_id == sim_date.year, (
+            f"Year in order ID {event.order_id!r} does not match sim_date year {sim_date.year}"
+        )

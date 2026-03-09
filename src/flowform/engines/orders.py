@@ -274,7 +274,7 @@ def run(
             continue  # No order today for this customer
 
         # --- Generate one order for this customer ---
-        order_id = f"ORD-{state.next_id('order')}"
+        order_id = f"ORD-{sim_date.year}-{state.next_id('order'):06d}"
 
         # Priority
         priority_roll = state.rng.random()

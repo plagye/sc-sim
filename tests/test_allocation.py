@@ -21,7 +21,6 @@ import uuid
 from datetime import date
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
@@ -33,7 +32,6 @@ from flowform.engines.allocation import (
 )
 from flowform.engines.inventory_movements import InventoryMovementEvent
 from flowform.state import SimulationState
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -124,7 +122,7 @@ def _make_line(
 def test_returns_empty_on_weekend(state, config):
     """Engine must return [] on a Saturday."""
     customer_id = state.customers[0].customer_id
-    order_id = "ORD-WKD-001"
+    order_id = "ORD-2026-900001"
     line = _make_line(order_id, 1, _SKU_A, 10)
     state.open_orders[order_id] = _make_order(order_id, customer_id, lines=[line])
     state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = 100
@@ -145,7 +143,7 @@ def test_returns_empty_on_weekend(state, config):
 def test_returns_empty_on_holiday(state, config):
     """Engine must return [] on a Polish public holiday."""
     customer_id = state.customers[0].customer_id
-    order_id = "ORD-HOL-001"
+    order_id = "ORD-2026-900002"
     line = _make_line(order_id, 1, _SKU_A, 10)
     state.open_orders[order_id] = _make_order(order_id, customer_id, lines=[line])
     state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = 100
@@ -170,7 +168,7 @@ def test_full_allocation_when_stock_sufficient(state, config):
     status → "allocated".
     """
     customer_id = state.customers[0].customer_id
-    order_id = "ORD-FULL-001"
+    order_id = "ORD-2026-900003"
 
     # Set up inventory: 100 units on hand
     state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = 100
@@ -221,7 +219,7 @@ def test_full_allocation_when_stock_sufficient(state, config):
 def test_zero_stock_creates_backorder(state, config):
     """When inventory == 0, a BackorderEvent is emitted; inventory unchanged."""
     customer_id = state.customers[0].customer_id
-    order_id = "ORD-BACK-001"
+    order_id = "ORD-2026-900004"
 
     # Ensure zero inventory for this SKU
     state.inventory.setdefault(_WAREHOUSE, {})[_SKU_B] = 0
@@ -262,7 +260,7 @@ def test_zero_stock_creates_backorder(state, config):
 def test_partial_fill(state, config):
     """When stock < need, partial fill: pick + backorder events with correct quantities."""
     customer_id = state.customers[0].customer_id
-    order_id = "ORD-PART-001"
+    order_id = "ORD-2026-900005"
 
     # Set 15 units available, order 40
     state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = 15
@@ -321,7 +319,7 @@ def test_priority_ordering_critical_before_standard(state, config):
     state.inventory.setdefault(_WAREHOUSE, {})[sku] = 30
 
     # Standard order (registered first but lower priority)
-    order_std_id = "ORD-PRI-STD"
+    order_std_id = "ORD-2026-900006"
     line_std = _make_line(order_std_id, 1, sku, 30)
     state.open_orders[order_std_id] = _make_order(
         order_std_id,
@@ -331,7 +329,7 @@ def test_priority_ordering_critical_before_standard(state, config):
     )
 
     # Critical order (registered second but higher priority)
-    order_crit_id = "ORD-PRI-CRIT"
+    order_crit_id = "ORD-2026-900007"
     line_crit = _make_line(order_crit_id, 1, sku, 30)
     state.open_orders[order_crit_id] = _make_order(
         order_crit_id,
@@ -340,7 +338,7 @@ def test_priority_ordering_critical_before_standard(state, config):
         lines=[line_crit],
     )
 
-    events = run(state, config, _BUSINESS_DAY)
+    run(state, config, _BUSINESS_DAY)
 
     # Critical order should have been fully allocated
     crit_order = state.open_orders[order_crit_id]
@@ -379,7 +377,7 @@ def test_priority_ordering_critical_before_standard(state, config):
 def test_backorder_escalation_after_14_days(state, config):
     """A standard-priority line backordered for >14 days must be escalated to express."""
     customer_id = state.customers[0].customer_id
-    order_id = "ORD-ESC-001"
+    order_id = "ORD-2026-900008"
     sku = "FF-GA15-SS304-PN16-FL-MN"
 
     # No stock — line will remain backordered
@@ -427,7 +425,7 @@ def test_backorder_escalation_after_14_days(state, config):
 def test_backorder_cancellation_after_30_days(state, config):
     """Lines backordered >30 days with a 100% cancel roll emit BackorderCancellationEvent."""
     customer_id = state.customers[0].customer_id
-    order_id = "ORD-CANC-001"
+    order_id = "ORD-2026-900009"
     sku = "FF-BA25-SS304-PN16-FL-MN"
 
     state.inventory.setdefault(_WAREHOUSE, {})[sku] = 0
@@ -484,7 +482,7 @@ def test_backorder_cancellation_after_30_days(state, config):
 def test_credit_hold_orders_skipped(state, config):
     """Orders with status "credit_hold" must not be allocated."""
     customer_id = state.customers[0].customer_id
-    order_id = "ORD-HOLD-001"
+    order_id = "ORD-2026-900010"
     sku = "FF-GA40-CS-PN16-FL-MN"
 
     state.inventory.setdefault(_WAREHOUSE, {})[sku] = 200
@@ -534,7 +532,7 @@ def test_invariant_allocated_plus_backorder_never_exceeds_ordered(state, config)
 
     orders_created: list[str] = []
     for i, sku in enumerate(skus):
-        order_id = f"ORD-INV-{i:03d}"
+        order_id = f"ORD-2026-9000{11 + i:02d}"
         line = _make_line(order_id, 1, sku, 20)
         state.open_orders[order_id] = _make_order(order_id, customer_id, lines=[line])
         orders_created.append(order_id)
@@ -579,7 +577,7 @@ def test_multiple_orders_multiple_lines_inventory_accounting(state, config):
     # Two orders, each with two lines
     orders_created: list[str] = []
 
-    order_id_1 = "ORD-MULTI-001"
+    order_id_1 = "ORD-2026-900013"
     state.open_orders[order_id_1] = _make_order(
         order_id_1, customer_id,
         lines=[
@@ -589,7 +587,7 @@ def test_multiple_orders_multiple_lines_inventory_accounting(state, config):
     )
     orders_created.append(order_id_1)
 
-    order_id_2 = "ORD-MULTI-002"
+    order_id_2 = "ORD-2026-900014"
     state.open_orders[order_id_2] = _make_order(
         order_id_2, customer_id,
         lines=[
@@ -637,6 +635,83 @@ def test_multiple_orders_multiple_lines_inventory_accounting(state, config):
 
 
 # ---------------------------------------------------------------------------
+# Test 14 (Pre-Fix 5): backordered line retried when stock is replenished
+# ---------------------------------------------------------------------------
+
+
+def test_backordered_line_retried_when_stock_arrives(state, config):
+    """A line backordered on day 1 must be allocated on day 2 when stock arrives.
+
+    This is the regression test for the order eligibility filter: orders with
+    status 'backordered' or 'partially_allocated' must remain in the allocation
+    queue so they are retried each business day.
+    """
+    customer_id = state.customers[0].customer_id
+    order_id = "ORD-2026-900015"
+    sku = "FF-BA80-CS-PN16-FL-MN"
+
+    # Day 1: zero stock → line becomes backordered
+    state.inventory.setdefault(_WAREHOUSE, {})[sku] = 0
+    line = _make_line(order_id, 1, sku, 10)
+    state.open_orders[order_id] = _make_order(order_id, customer_id, lines=[line])
+
+    day1 = date(2026, 1, 5)
+    run(state, config, day1)
+
+    # Verify backorder state after day 1
+    updated_line = state.open_orders[order_id]["lines"][0]
+    assert updated_line["line_status"] == "backordered", (
+        f"Expected 'backordered' after day 1, got '{updated_line['line_status']}'"
+    )
+
+    # Day 2: stock arrives
+    state.inventory[_WAREHOUSE][sku] = 50
+
+    day2 = date(2026, 1, 7)  # Wednesday (skip Jan 6 holiday)
+    run(state, config, day2)
+
+    # Line should now be allocated
+    updated_line = state.open_orders[order_id]["lines"][0]
+    assert updated_line["line_status"] == "allocated", (
+        f"Expected 'allocated' after stock arrived on day 2, "
+        f"got '{updated_line['line_status']}'"
+    )
+    assert updated_line["quantity_allocated"] == 10
+
+    # Cleanup
+    del state.open_orders[order_id]
+
+
+# ---------------------------------------------------------------------------
+# Test 13 (Pre-Fix 4): state.allocated populated after full allocation
+# ---------------------------------------------------------------------------
+
+
+def test_state_allocated_populated_after_full_allocation(state, config):
+    """After a full allocation, state.allocated[order_id][line_id] == qty_ordered."""
+    customer_id = state.customers[0].customer_id
+    order_id = "ORD-2026-900016"
+    qty = 25
+
+    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = 100
+    line = _make_line(order_id, 1, _SKU_A, qty)
+    state.open_orders[order_id] = _make_order(order_id, customer_id, lines=[line])
+
+    run(state, config, _BUSINESS_DAY)
+
+    line_id = f"{order_id}-L1"
+    assert order_id in state.allocated, "order_id should appear in state.allocated"
+    assert line_id in state.allocated[order_id], "line_id should appear in state.allocated[order_id]"
+    assert state.allocated[order_id][line_id] == qty, (
+        f"Expected state.allocated[{order_id!r}][{line_id!r}] == {qty}, "
+        f"got {state.allocated[order_id][line_id]}"
+    )
+
+    # Cleanup
+    del state.open_orders[order_id]
+
+
+# ---------------------------------------------------------------------------
 # Test 12: backorder_days increments each day for waiting lines
 # ---------------------------------------------------------------------------
 
@@ -644,7 +719,7 @@ def test_multiple_orders_multiple_lines_inventory_accounting(state, config):
 def test_backorder_days_increments_each_business_day(state, config):
     """A backordered line's backorder_days counter must increment on each business day."""
     customer_id = state.customers[0].customer_id
-    order_id = "ORD-BDAY-001"
+    order_id = "ORD-2026-900017"
     sku = "FF-GA15-CS-PN25-FL-MN"
 
     # No stock so line stays backordered

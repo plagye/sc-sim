@@ -160,7 +160,9 @@ def run(
     for load in state.active_loads.values():
         status = load.get("status", "")
 
-        # Skip terminal loads
+        # Skip terminal loads (includes "delivered" which awaits POD in pending_pod).
+        # The pod.py engine fires pod_received and removes loads from active_loads.
+        # A "delivered" load must never be re-advanced by this engine.
         if status in _TERMINAL_STATUSES:
             continue
 

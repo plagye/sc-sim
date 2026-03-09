@@ -1,5 +1,5 @@
-# Inventory snapshot generator: end-of-day full dump per warehouse.
-# TODO: implement in Step 38
+# Schema evolution engine: manages field appearance by sim day number.
+# TODO: implement in Step 41
 from __future__ import annotations
 
 from datetime import date
