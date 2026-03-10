@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 
 from flowform.config import load_config
+from flowform.calendar import is_first_business_day_of_month as _is_first_business_day_of_month
 from flowform.engines.planning import (
     DemandPlanEvent,
-    _is_first_business_day_of_month,
     run,
 )
 from flowform.state import SimulationState

@@ -9,12 +9,12 @@ safety stock, reorder points, and target stock levels.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from typing import Literal
 
 from pydantic import BaseModel
 
-from flowform.calendar import is_business_day
+from flowform.calendar import is_business_day, is_first_business_day_of_month
 from flowform.config import Config
 from flowform.state import SimulationState
 
@@ -42,16 +42,6 @@ class InventoryTargetEvent(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _is_first_business_day_of_month(sim_date: date) -> bool:
-    """Return True if sim_date is the first business day of its month."""
-    if not is_business_day(sim_date):
-        return False
-    for day_offset in range(1, sim_date.day):
-        earlier = sim_date - timedelta(days=day_offset)
-        if is_business_day(earlier):
-            return False
-    return True
-
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -75,7 +65,7 @@ def run(
         A list of InventoryTargetEvent objects (one per SKU per warehouse),
         or an empty list if today is not the first business day of the month.
     """
-    if not _is_first_business_day_of_month(sim_date):
+    if not is_first_business_day_of_month(sim_date):
         return []
 
     rng = state.rng

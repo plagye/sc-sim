@@ -147,6 +147,11 @@ def _update_order_lines_on_delivery(
                 line["quantity_shipped"] = shipped_qty
                 shipped_value_pln += shipped_qty * line.get("unit_price", 0.0) * rate
 
+                # Clean up state.allocated so stale entries don't accumulate
+                line_id = line.get("line_id")
+                if line_id and oid in state.allocated:
+                    state.allocated[oid].pop(line_id, None)
+
         if customer_id and shipped_value_pln > 0.0:
             state.customer_balances[customer_id] = (
                 state.customer_balances.get(customer_id, 0.0) + shipped_value_pln

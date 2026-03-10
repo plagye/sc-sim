@@ -29,6 +29,7 @@ from flowform.output.writer import (
     ERP_EVENT_TYPES,
     ADM_MONTHLY_EVENT_TYPES,
     FORECAST_MONTHLY_EVENT_TYPES,
+    ADM_PER_EVENT_TYPES,
     is_monthly_event_type,
     write_events,
 )
@@ -160,10 +161,11 @@ def test_tms_batch_events_route_correctly(tmp_path: Path) -> None:
 
 
 def test_adm_daily_events_route_correctly(tmp_path: Path) -> None:
+    # demand_signal now routes to a per-event file, not an ADM daily batch file.
     event = _adm("demand_signal", signal_id="S001")
     written = write_events([event], _SIM_DATE, output_dir=tmp_path)
 
-    expected = tmp_path / "adm" / _DATE_STR / "demand_signals.json"
+    expected = tmp_path / "adm" / "demand_signals" / "S001.json"
     assert len(written) == 1
     assert written[0] == expected
     assert expected.exists()

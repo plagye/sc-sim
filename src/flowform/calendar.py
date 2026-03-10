@@ -171,3 +171,25 @@ def order_multiplier(d: date) -> float:
 def is_edi_only_day(d: date) -> bool:
     """Return True if d is Saturday or Sunday (EDI auto-orders only from Distributors)."""
     return is_weekend(d)
+
+
+def is_first_business_day_of_month(sim_date: date) -> bool:
+    """Return True if sim_date is the first business day of its month.
+
+    Iterates back from sim_date to the 1st of the month; if any earlier day
+    in the same month is also a business day then sim_date is not the first.
+
+    Args:
+        sim_date: The candidate date.
+
+    Returns:
+        True if sim_date is a business day and no earlier day in the same
+        calendar month is also a business day.
+    """
+    if not is_business_day(sim_date):
+        return False
+    for day_offset in range(1, sim_date.day):
+        earlier = sim_date - timedelta(days=day_offset)
+        if is_business_day(earlier):
+            return False
+    return True

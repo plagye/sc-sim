@@ -309,8 +309,10 @@ def test_catalog_weight_round_trip(config, db_path):
 def test_counters_roundtrip(config, db_path):
     state = SimulationState.from_new(config, db_path=db_path)
 
-    assert set(state.counters.keys()) == {"order", "batch", "shipment", "load", "return"}
-    assert all(v == 1000 for v in state.counters.values())
+    assert set(state.counters.keys()) == {"order", "batch", "shipment", "load", "return", "signal"}
+    # All counters start at 1000 except signal which starts at 0
+    assert state.counters["signal"] == 0
+    assert all(v == 1000 for k, v in state.counters.items() if k != "signal")
 
     state.counters["order"] = 1042
     state.counters["load"] = 1007

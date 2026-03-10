@@ -368,31 +368,68 @@ class TestInventorySnapshots:
 
 class TestReproducibility:
 
-    def test_same_seed_same_event_count(self, tmp_path_factory: pytest.TempPathFactory) -> None:
-        """Running 10 calendar days twice with the same seed yields the same event count."""
+    def _run_n_days(
+        self,
+        tmp_path_factory: pytest.TempPathFactory,
+        n: int,
+        run_label: str,
+    ) -> dict:
+        """Run *n* calendar days from a fresh state and return diagnostics."""
         from flowform.cli import _run_day_loop
         from flowform.config import load_config
         from flowform.state import SimulationState
 
         config = load_config(_CONFIG_SRC)
+        tmp = tmp_path_factory.mktemp(run_label)
+        db_path = tmp / "state" / "simulation.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        output_dir = tmp / "output"
+        state = SimulationState.from_new(config, db_path=db_path)
 
-        def _run_10() -> int:
-            tmp = tmp_path_factory.mktemp("repro_run")
-            db_path = tmp / "state" / "simulation.db"
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            output_dir = tmp / "output"
-            state = SimulationState.from_new(config, db_path=db_path)
-            total = 0
-            for _ in range(10):
-                next_date = state.current_date + timedelta(days=1)
-                state.advance_day(next_date)
-                evts = _run_day_loop(state, config, next_date, output_dir=output_dir)
-                total += len(evts)
-                state.save()
-            return total
+        all_events: list = []
+        for _ in range(n):
+            next_date = state.current_date + timedelta(days=1)
+            state.advance_day(next_date)
+            evts = _run_day_loop(state, config, next_date, output_dir=output_dir)
+            all_events.extend(evts)
+            state.save()
 
-        count1 = _run_10()
-        count2 = _run_10()
-        assert count1 == count2, (
-            f"Event counts differ between runs: {count1} vs {count2}"
+        payment_events = [
+            ev for ev in all_events
+            if _get_type(ev) == "payment"
+        ]
+        first_payment_amount = (
+            _get_field(payment_events[0], "payment_amount_pln", None)
+            if payment_events
+            else None
         )
+
+        return {
+            "total_events": len(all_events),
+            "active_loads_keys": sorted(state.active_loads.keys()),
+            "first_payment_amount": first_payment_amount,
+        }
+
+    def test_same_seed_same_event_count(self, tmp_path_factory: pytest.TempPathFactory) -> None:
+        """Running 30 calendar days twice with the same seed yields identical results:
+        same event count, same active_loads keys, and same first payment amount.
+        """
+        run1 = self._run_n_days(tmp_path_factory, n=30, run_label="repro_run1")
+        run2 = self._run_n_days(tmp_path_factory, n=30, run_label="repro_run2")
+
+        assert run1["total_events"] == run2["total_events"], (
+            f"Event counts differ between runs: "
+            f"{run1['total_events']} vs {run2['total_events']}"
+        )
+
+        assert run1["active_loads_keys"] == run2["active_loads_keys"], (
+            f"active_loads keys differ between runs:\n"
+            f"  run1: {run1['active_loads_keys'][:5]}...\n"
+            f"  run2: {run2['active_loads_keys'][:5]}..."
+        )
+
+        if run1["first_payment_amount"] is not None:
+            assert abs(run1["first_payment_amount"] - run2["first_payment_amount"]) < 0.01, (
+                f"First payment amount differs: "
+                f"{run1['first_payment_amount']} vs {run2['first_payment_amount']}"
+            )

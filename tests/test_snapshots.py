@@ -228,6 +228,41 @@ def test_zero_inventory_skus_excluded(state, config):
         state.inventory["W01"].pop(fake_sku, None)
 
 
+def test_snapshot_available_never_negative(tmp_path):
+    """Run a 30-day simulation and verify no snapshot position has quantity_available < 0."""
+    from datetime import timedelta
+
+    from flowform.cli import _run_day_loop
+    from flowform.config import load_config
+    from flowform.engines.snapshots import InventorySnapshotEvent
+    from flowform.state import SimulationState
+
+    config_path = Path("/home/coder/sc-sim/config.yaml")
+    config = load_config(config_path)
+
+    db_path = tmp_path / "sim.db"
+    output_dir = tmp_path / "output"
+    state = SimulationState.from_new(config, db_path=db_path)
+
+    all_snapshots: list[InventorySnapshotEvent] = []
+    for _ in range(30):
+        next_date = state.current_date + timedelta(days=1)
+        state.advance_day(next_date)
+        events = _run_day_loop(state, config, next_date, output_dir=output_dir)
+        for ev in events:
+            if isinstance(ev, InventorySnapshotEvent):
+                all_snapshots.append(ev)
+        state.save()
+
+    assert all_snapshots, "Expected at least one inventory_snapshot event in 30 days"
+    for snap in all_snapshots:
+        for pos in snap.positions:
+            assert pos.quantity_available >= 0, (
+                f"Negative quantity_available ({pos.quantity_available}) for SKU "
+                f"{pos.sku} in warehouse {snap.warehouse}"
+            )
+
+
 def test_w02_positions_reflect_w02_state(state, config):
     """W02 positions should reflect W02 inventory, not W01."""
     w01_skus = set(state.inventory.get("W01", {}).keys())

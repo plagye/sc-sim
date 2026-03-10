@@ -13,6 +13,7 @@ from flowform.calendar import (
     easter_sunday,
     is_business_day,
     is_edi_only_day,
+    is_first_business_day_of_month,
     is_holiday,
     is_weekend,
     next_business_day,
@@ -311,3 +312,33 @@ class TestIsEdiOnlyDay:
     def test_holiday_monday_is_not_edi_only(self) -> None:
         # Easter Monday is still a weekday structurally, not an EDI-only day
         assert not is_edi_only_day(date(2026, 4, 6))
+
+
+# ---------------------------------------------------------------------------
+# is_first_business_day_of_month
+# ---------------------------------------------------------------------------
+
+class TestIsFirstBusinessDayOfMonth:
+    def test_jan_holiday_shifted(self) -> None:
+        """Jan 1 is a holiday, so Jan 2 (Friday) is the first business day."""
+        assert is_first_business_day_of_month(date(2026, 1, 2)) is True
+
+    def test_jan_1_not_first_biz_day(self) -> None:
+        """Jan 1 is a holiday — not a business day at all."""
+        assert is_first_business_day_of_month(date(2026, 1, 1)) is False
+
+    def test_march_sunday_shifted(self) -> None:
+        """March 1 2026 is a Sunday, so March 2 (Monday) is the first business day."""
+        assert is_first_business_day_of_month(date(2026, 3, 2)) is True
+
+    def test_march_1_not_first_biz_day(self) -> None:
+        """March 1 2026 is a Sunday — not a business day."""
+        assert is_first_business_day_of_month(date(2026, 3, 1)) is False
+
+    def test_second_business_day_is_not_first(self) -> None:
+        """Jan 5 (Monday) is NOT the first business day of January 2026 (Jan 2 is)."""
+        assert is_first_business_day_of_month(date(2026, 1, 5)) is False
+
+    def test_weekend_is_not_first_biz_day(self) -> None:
+        """A Saturday can never be the first business day of the month."""
+        assert is_first_business_day_of_month(date(2026, 2, 7)) is False

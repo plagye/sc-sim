@@ -194,6 +194,8 @@ class SimulationState:
         daily_production_receipts: list[dict[str, Any]] | None = None,
         carrier_disruptions: dict[str, dict[str, Any]] | None = None,
         pending_pod: dict[str, dict[str, Any]] | None = None,
+        deferred_erp_movements: list[dict[str, Any]] | None = None,
+        tms_maintenance_fired_month: str = "",
     ) -> None:
         self._db_path = db_path
         self.sim_day = sim_day
@@ -229,6 +231,12 @@ class SimulationState:
         self.pending_pod: dict[str, dict[str, Any]] = (
             pending_pod if pending_pod is not None else {}
         )
+        # ERP inventory movements deferred to the next day's output (~2% carry-forward).
+        self.deferred_erp_movements: list[dict[str, Any]] = (
+            deferred_erp_movements if deferred_erp_movements is not None else []
+        )
+        # Calendar month (YYYY-MM) when TMS maintenance burst last fired; "" if never.
+        self.tms_maintenance_fired_month: str = tms_maintenance_fired_month
 
     # ------------------------------------------------------------------
     # Public class methods
@@ -273,6 +281,7 @@ class SimulationState:
             "shipment": 1000,
             "load": 1000,
             "return": 1000,
+            "signal": 0,
         }
         production_pipeline: list[dict[str, Any]] = []
 
@@ -299,6 +308,8 @@ class SimulationState:
             production_pipeline=production_pipeline,
             carrier_disruptions={},
             pending_pod={},
+            deferred_erp_movements=[],
+            tms_maintenance_fired_month="",
         )
         state.save()
         return state
@@ -516,6 +527,8 @@ class SimulationState:
             "production_pipeline": self.production_pipeline,
             "carrier_disruptions": self.carrier_disruptions,
             "pending_pod": self.pending_pod,
+            "deferred_erp_movements": self.deferred_erp_movements,
+            "tms_maintenance_fired_month": self.tms_maintenance_fired_month,
         }
         for key, value in ops.items():
             conn.execute(
@@ -592,6 +605,12 @@ class SimulationState:
             _kv("carrier_disruptions") or {}
         )
         pending_pod: dict[str, dict[str, Any]] = _kv("pending_pod") or {}
+        deferred_erp_movements: list[dict[str, Any]] = (
+            _kv("deferred_erp_movements") or []
+        )
+        tms_maintenance_fired_month: str = (
+            _kv("tms_maintenance_fired_month") or ""
+        )
 
         return cls(
             db_path=db_path,
@@ -616,4 +635,6 @@ class SimulationState:
             production_pipeline=production_pipeline,
             carrier_disruptions=carrier_disruptions,
             pending_pod=pending_pod,
+            deferred_erp_movements=deferred_erp_movements,
+            tms_maintenance_fired_month=tms_maintenance_fired_month,
         )

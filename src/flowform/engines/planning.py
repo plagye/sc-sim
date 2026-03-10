@@ -6,12 +6,12 @@ Emits one DemandPlanEvent covering a 6-month planning horizon.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from typing import Literal
 
 from pydantic import BaseModel
 
-from flowform.calendar import is_business_day
+from flowform.calendar import is_business_day, is_first_business_day_of_month
 from flowform.config import Config
 from flowform.state import SimulationState
 
@@ -73,22 +73,6 @@ def _parse_product_group(sku: str) -> str:
     return f"{type_code}-DN{dn}-{mat}"
 
 
-def _is_first_business_day_of_month(sim_date: date) -> bool:
-    """Return True if sim_date is the first business day of its month.
-
-    Iterates back from sim_date-1 to the 1st of the month; if any of those
-    days is also a business day then sim_date is not the first.
-    """
-    if not is_business_day(sim_date):
-        return False
-    # Check every earlier day in the same month
-    for day_offset in range(1, sim_date.day):
-        earlier = sim_date - timedelta(days=day_offset)
-        if is_business_day(earlier):
-            return False
-    return True
-
-
 def _month_str(year: int, month: int) -> str:
     """Return 'YYYY-MM' for given year/month, handling month overflow."""
     while month > 12:
@@ -118,7 +102,7 @@ def run(
         A list containing exactly one DemandPlanEvent, or an empty list if
         today is not the first business day of the month.
     """
-    if not _is_first_business_day_of_month(sim_date):
+    if not is_first_business_day_of_month(sim_date):
         return []
 
     rng = state.rng

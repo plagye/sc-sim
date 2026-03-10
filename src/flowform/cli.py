@@ -166,13 +166,26 @@ def _run_day_loop(
     from flowform import schema_evolution
     all_events.extend(schema_evolution.run(state, config, sim_date))  # type: ignore[arg-type]
 
-    # Step 18: Noise injection — TODO
+    # Step 18: Noise injection
+    from flowform.noise.injector import inject as _inject_noise
+    all_events_dicts: list[dict] = []
+    for e in all_events:
+        if hasattr(e, "model_dump"):
+            d = e.model_dump()
+        else:
+            d = dict(e)
+        all_events_dicts.append(d)
+    all_events_dicts = _inject_noise(all_events_dicts, config, state.rng)
+
+    # Step 18a: Late-arriving data post-processing
+    from flowform.engines import late_arriving
+    all_events_dicts = late_arriving.apply(all_events_dicts, state, config, sim_date)  # type: ignore[arg-type]
 
     # Serialise all events to output files
-    # write_events takes (events_as_dicts, sim_date, output_dir)
+    # Strip internal marker fields (e.g., _is_deferred) before writing.
     serialised = [
-        e.model_dump() if hasattr(e, "model_dump") else dict(e)
-        for e in all_events
+        {k: v for k, v in d.items() if not k.startswith("_")}
+        for d in all_events_dicts
     ]
     if output_dir is not None:
         write_events(serialised, sim_date, output_dir=output_dir)

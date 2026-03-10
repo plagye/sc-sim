@@ -124,9 +124,7 @@ def _generate_signal(
     Returns:
         A fully populated DemandSignalEvent.
     """
-    # Signal counter
-    if "signal" not in state.counters:
-        state.counters["signal"] = 0
+    # Signal counter (always initialised in state.counters by from_new())
     state.counters["signal"] += 1
     signal_id = f"SIG-{sim_date.strftime('%Y%m%d')}-{state.counters['signal']:04d}"
 

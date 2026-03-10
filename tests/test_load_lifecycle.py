@@ -477,3 +477,108 @@ def test_delivered_load_awaiting_pod_not_re_advanced(state, config):
         assert state.active_loads["LOAD-9001"]["status"] == "delivered", (
             f"Load should remain 'delivered' on {d}, not advance further"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 16 (Fix 1): state.allocated entry cleaned up when lines ship
+# ---------------------------------------------------------------------------
+
+
+def test_allocated_cleared_on_shipment(state, config):
+    """On delivery, lines that transition to 'shipped' must be removed from
+    state.allocated so stale allocation entries don't accumulate."""
+    order_id = "ORD-LC-FIX1"
+    _make_order_with_allocated_lines(state, order_id, qty=10)
+
+    # Seed the allocation tracking entry (mirrors what allocation.py does)
+    sku = state.open_orders[order_id]["lines"][0]["sku"]
+    line_id = state.open_orders[order_id]["lines"][0]["line_id"]
+    state.allocated[order_id] = {line_id: 10}
+
+    ofd_date = _BIZ_DAY - timedelta(days=2)
+    _make_load(
+        state,
+        load_id="LOAD-FIX1",
+        status="out_for_delivery",
+        out_for_delivery_date=ofd_date,
+        delivery_window=1,
+        order_ids=[order_id],
+    )
+
+    with patch(_RELIABILITY_PATCH, return_value=1.0):
+        load_lifecycle.run(state, config, _BIZ_DAY)
+
+    # The line should be shipped and the allocated entry cleaned up
+    order = state.open_orders[order_id]
+    assert order["lines"][0]["line_status"] == "shipped"
+
+    # state.allocated entry for this order/line must be gone
+    remaining = state.allocated.get(order_id, {})
+    assert line_id not in remaining, (
+        f"Expected allocated entry for {line_id} to be removed after shipment"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 17 (Fix 4): customer balance invoiced in PLN with currency conversion
+# ---------------------------------------------------------------------------
+
+
+def test_balance_invoiced_in_pln(state, config):
+    """When a EUR-currency order is delivered, the customer balance must be
+    updated in PLN (unit_price * qty * exchange_rate), not in EUR."""
+    order_id = "ORD-LC-FIX4"
+    sku = state.catalog[0].sku
+    customer_id = state.customers[0].customer_id
+
+    # Seed exchange rate: 1 EUR = 4.50 PLN
+    state.exchange_rates["EUR"] = 4.50
+
+    # Create a EUR order: 10 units at 100 EUR each → expected PLN = 4500.0
+    state.open_orders[order_id] = {
+        "event_type": "customer_order",
+        "event_id": str(uuid.uuid4()),
+        "order_id": order_id,
+        "customer_id": customer_id,
+        "simulation_date": _BIZ_DAY.isoformat(),
+        "status": "allocated",
+        "priority": "standard",
+        "currency": "EUR",
+        "load_id": None,
+        "shipment_id": None,
+        "lines": [
+            {
+                "line_id": f"{order_id}-L1",
+                "sku": sku,
+                "quantity_ordered": 10,
+                "quantity_allocated": 10,
+                "quantity_shipped": 0,
+                "quantity_backordered": 0,
+                "unit_price": 100.0,
+                "line_status": "allocated",
+                "warehouse_id": "W01",
+            }
+        ],
+    }
+
+    # Ensure customer starts with zero balance
+    state.customer_balances[customer_id] = 0.0
+
+    ofd_date = _BIZ_DAY - timedelta(days=2)
+    _make_load(
+        state,
+        load_id="LOAD-FIX4",
+        status="out_for_delivery",
+        out_for_delivery_date=ofd_date,
+        delivery_window=1,
+        order_ids=[order_id],
+    )
+
+    with patch(_RELIABILITY_PATCH, return_value=1.0):
+        load_lifecycle.run(state, config, _BIZ_DAY)
+
+    expected_pln = 10 * 100.0 * 4.50  # = 4500.0
+    actual_balance = state.customer_balances[customer_id]
+    assert abs(actual_balance - expected_pln) < 0.01, (
+        f"Expected balance {expected_pln} PLN, got {actual_balance}"
+    )
