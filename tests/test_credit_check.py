@@ -202,14 +202,25 @@ def test_release_when_balance_drops(state, config):
 
 
 def test_multiple_orders_cumulative_exposure(state, config):
-    """First order alone is fine; second order combined with first tips over limit."""
+    """First order is held when combined exposure exceeds limit; second is then clear.
+
+    With held orders excluded from exposure (catch-22 fix), the sequencing is:
+      1. order1 (confirmed, 60%) is evaluated: both orders are confirmed so
+         combined exposure = 110% > limit → order1 is HELD.
+      2. order2 (confirmed, 50%) is evaluated: order1 is now held so excluded;
+         remaining exposure = 50% < limit → order2 is NOT held.
+
+    This is the correct post-fix behavior: the first order to tip the total
+    over the limit is held; once held it no longer blocks subsequent orders
+    from being confirmed (they see only active/non-held exposure).
+    """
     customer = state.customers[0]
     credit_limit = customer.credit_limit
 
     # Zero balance to isolate order value effects
     state.customer_balances[customer.customer_id] = 0.0
 
-    # First order: 60% of credit limit — under limit on its own
+    # First order: 60% of credit limit
     first_order_value = credit_limit * 0.60
     order_id_1 = "ORD-TEST-004"
     order1 = _make_order(
@@ -221,7 +232,7 @@ def test_multiple_orders_cumulative_exposure(state, config):
     )
     state.open_orders[order_id_1] = order1
 
-    # Second order: 50% of credit limit — alone fine, but combined = 110% → over
+    # Second order: 50% of credit limit — combined with first = 110% → over
     second_order_value = credit_limit * 0.50
     order_id_2 = "ORD-TEST-005"
     order2 = _make_order(
@@ -235,20 +246,21 @@ def test_multiple_orders_cumulative_exposure(state, config):
 
     result = run(state, config, date(2026, 1, 5))
 
-    # First order should NOT be held (it appears first in insertion order;
-    # at time of its evaluation, combined exposure = 110% of limit because
-    # open_orders_value includes BOTH orders).
-    # Per spec: open_orders_value is total of ALL open orders for customer.
-    # So both orders contribute to exposure from the start.
-    # Combined exposure = 110% of limit → both orders should be held.
     hold_events = [e for e in result if isinstance(e, CreditHoldEvent)]
     hold_order_ids = {e.order_id for e in hold_events}
 
-    # Both orders see total exposure = 110% → both should be held
-    assert order_id_1 in hold_order_ids or order_id_2 in hold_order_ids, (
-        "At least one order must be held when combined exposure exceeds limit"
+    # order1 is evaluated first; combined (non-held) exposure = 110% → held
+    assert order_id_1 in hold_order_ids, (
+        "First order must be held: combined confirmed exposure 110% > limit"
     )
-    assert order_id_2 in hold_order_ids, "Second order must be held (cumulative exposure)"
+
+    # order2 is evaluated after order1 is held; held orders are excluded so
+    # exposure = 50% < limit → order2 must NOT be held
+    assert order_id_2 not in hold_order_ids, (
+        "Second order must NOT be held: after order1 is held, remaining "
+        "confirmed exposure = 50% < limit"
+    )
+    assert state.open_orders[order_id_2]["status"] == "confirmed"
 
     # Cleanup
     del state.open_orders[order_id_1]
@@ -257,31 +269,51 @@ def test_multiple_orders_cumulative_exposure(state, config):
 
 
 # ---------------------------------------------------------------------------
-# Test 6: held orders still count toward exposure (hold doesn't reduce it)
+# Test 6: held orders do NOT count toward exposure (fix for the catch-22 bug)
 # ---------------------------------------------------------------------------
 
 
-def test_hold_does_not_reduce_exposure(state, config):
-    """A credit-held order still counts toward total exposure for subsequent orders."""
+def test_held_orders_excluded_from_new_order_exposure(state, config):
+    """A credit-held order must NOT count toward exposure when evaluating new orders.
+
+    Before the catch-22 fix, held orders were included in _compute_open_orders_value_pln,
+    making it impossible for any subsequent confirmed order to pass a credit check
+    once a customer had a large volume of held orders.
+
+    Scenario:
+      - Order 1 is on hold for 40% of the credit limit.
+      - Order 2 is confirmed for 30% of the limit.
+      - Balance = 0.
+
+    Evaluation sequence (held orders excluded from _compute_open_orders_value_pln):
+      1. order1 (credit_hold): exposure = 30% (only confirmed orders counted) < 100%
+         → RELEASED. Cache invalidated.
+      2. order2 (confirmed): exposure = 40% (order1, now confirmed) + 30% (order2)
+         = 70% < 100% → NOT held.
+
+    Key invariant: 40% + 30% = 70% < 100% so neither order ends up held after
+    the release cascade.  We use 40%/30% precisely to avoid the cascade where
+    releasing order1 causes order2 to tip over the limit.
+    """
     customer = state.customers[0]
     credit_limit = customer.credit_limit
 
     state.customer_balances[customer.customer_id] = 0.0
 
-    # Order 1 already on hold: 80% of credit limit
+    # Order 1 already on hold: 40% of credit limit
     order_id_1 = "ORD-TEST-006"
     order1 = _make_order(
         order_id=order_id_1,
         customer_id=customer.customer_id,
         currency="PLN",
-        unit_price=credit_limit * 0.80,
+        unit_price=credit_limit * 0.40,
         quantity=1,
         status="credit_hold",
     )
     state.open_orders[order_id_1] = order1
 
-    # Order 2 confirmed: 30% of credit limit — pushes total to 110% even though
-    # order 1 is already on hold
+    # Order 2 confirmed: 30% of credit limit.
+    # After order1 is released: total confirmed = 40% + 30% = 70% < limit → ok.
     order_id_2 = "ORD-TEST-007"
     order2 = _make_order(
         order_id=order_id_2,
@@ -295,18 +327,24 @@ def test_hold_does_not_reduce_exposure(state, config):
 
     result = run(state, config, date(2026, 1, 5))
 
-    # Order 1 is on hold — exposure is 110%, so it should NOT be released
-    # (110% > 100%)
+    # Order 1 is on hold. Exposure for release check = 30% (order2 confirmed only)
+    # < 100% → order 1 must be RELEASED.
     release_events = [e for e in result if isinstance(e, CreditReleaseEvent)
                       and e.order_id == order_id_1]
-    assert len(release_events) == 0, "Held order must NOT be released when still over limit"
-    assert state.open_orders[order_id_1]["status"] == "credit_hold"
+    assert len(release_events) == 1, (
+        "Held order must be released: its own value is excluded from exposure, "
+        "so exposure = 30% (confirmed order only) < credit limit"
+    )
+    assert state.open_orders[order_id_1]["status"] == "confirmed"
 
-    # Order 2 confirmed — total exposure = 110% → should be held
+    # Order 2 must NOT be held — after order1 is released, total confirmed
+    # exposure = 40% + 30% = 70% < limit.
     hold_events = [e for e in result if isinstance(e, CreditHoldEvent)
                    and e.order_id == order_id_2]
-    assert len(hold_events) == 1, "Confirmed order must be held when held orders count toward exposure"
-    assert state.open_orders[order_id_2]["status"] == "credit_hold"
+    assert len(hold_events) == 0, (
+        "Confirmed order must NOT be held: 40%+30% = 70% is under the credit limit"
+    )
+    assert state.open_orders[order_id_2]["status"] == "confirmed"
 
     # Cleanup
     del state.open_orders[order_id_1]
@@ -506,4 +544,133 @@ def test_partially_shipped_order_contributes_to_exposure(state, config):
     # Cleanup
     del state.open_orders[partial_id]
     del state.open_orders[new_id]
+    state.customer_balances[customer.customer_id] = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Test 11 (Fix 1): exposure uses unshipped quantity, not quantity_ordered
+# ---------------------------------------------------------------------------
+
+
+def test_exposure_excludes_shipped_quantity(state, config):
+    """Exposure must be based on unshipped qty (qty_ordered - qty_shipped),
+    not the full quantity_ordered.
+
+    If 10 units were ordered and 8 shipped, only 2 units remain outstanding.
+    Exposure value = 2 * unit_price, not 10 * unit_price.
+    """
+    from flowform.engines.credit import _order_value_pln
+
+    unit_price = 1000.0
+    order = {
+        "currency": "PLN",
+        "lines": [
+            {
+                "quantity_ordered": 10,
+                "quantity_shipped": 8,
+                "unit_price": unit_price,
+            }
+        ],
+    }
+    exchange_rates = {"EUR": 4.30, "USD": 4.05}
+
+    value = _order_value_pln(order, exchange_rates)
+
+    expected = 2 * unit_price  # only 2 units unshipped
+    assert value == expected, (
+        f"Expected exposure {expected} (unshipped qty=2), got {value}"
+    )
+
+    # Also verify the full 10 * price is NOT returned
+    assert value != 10 * unit_price, "Exposure must not include already-shipped units"
+
+
+# ---------------------------------------------------------------------------
+# Test 12: catch-22 fix — held orders excluded from exposure (named test)
+# ---------------------------------------------------------------------------
+
+
+def test_held_orders_excluded_from_exposure(state, config):
+    """Held orders must not count toward exposure — the named catch-22 fix test.
+
+    Reproduces the exact scenario described in the bug report:
+      - 5 credit_hold orders, each worth 50_000 PLN (total held = 250_000 PLN)
+      - 1 confirmed order worth 30_000 PLN
+      - Balance = 0 PLN
+      - Customer credit_limit must be > 250_000 PLN (use the highest-limit customer
+        so the held amounts are meaningful but the confirmed order alone is safe)
+
+    With the old (buggy) logic:
+      open_orders_value = 250_000 (held) + 30_000 (confirmed) = 280_000
+      exposure = 280_000 > any limit → confirmed order held, held orders never released
+
+    With the fix:
+      open_orders_value = 30_000 (confirmed only, held excluded)
+      exposure = 30_000 << limit → confirmed order NOT held
+      Each held order sees exposure = 30_000 < limit → released
+    """
+    # Use the customer with the highest credit limit to ensure the 50K-per-held-order
+    # amounts do not themselves exceed the limit once the orders are released.
+    customer = max(state.customers, key=lambda c: c.credit_limit)
+    credit_limit = customer.credit_limit
+    assert credit_limit > 300_000.0, (
+        f"Highest-limit customer should have limit > 300K, got {credit_limit:.0f}"
+    )
+    state.customer_balances[customer.customer_id] = 0.0
+
+    held_unit_price = 50_000.0  # 5 × 50K = 250K total held
+
+    held_ids: list[str] = []
+    for i in range(5):
+        oid = f"ORD-TEST-CATCH22-{i:02d}"
+        order = _make_order(
+            order_id=oid,
+            customer_id=customer.customer_id,
+            currency="PLN",
+            unit_price=held_unit_price,
+            quantity=1,
+            status="credit_hold",
+        )
+        state.open_orders[oid] = order
+        held_ids.append(oid)
+
+    confirmed_id = "ORD-TEST-CATCH22-CONF"
+    confirmed_order = _make_order(
+        order_id=confirmed_id,
+        customer_id=customer.customer_id,
+        currency="PLN",
+        unit_price=30_000.0,
+        quantity=1,
+        status="confirmed",
+    )
+    state.open_orders[confirmed_id] = confirmed_order
+
+    result = run(state, config, date(2026, 1, 5))
+
+    # The confirmed order's standalone exposure = 30K < limit → must NOT be held.
+    # With the fix, held orders are excluded so the confirmed order sees only itself.
+    hold_events_for_confirmed = [
+        e for e in result
+        if isinstance(e, CreditHoldEvent) and e.order_id == confirmed_id
+    ]
+    assert len(hold_events_for_confirmed) == 0, (
+        f"Confirmed 30K order must NOT be held. "
+        f"credit_limit={credit_limit:.0f}, exposure (excl. held) = 30_000 PLN"
+    )
+    assert state.open_orders[confirmed_id]["status"] == "confirmed"
+
+    # All 5 held orders must be released: each sees exposure = confirmed (30K)
+    # + the cumulative value of previously-released orders.
+    # Since limit >> 250K (the highest-limit customer has limit > 1M), even
+    # after all held orders are released as confirmed, total = 280K << limit.
+    for held_id in held_ids:
+        assert state.open_orders[held_id]["status"] == "confirmed", (
+            f"{held_id} must be released: without held orders in exposure, "
+            f"exposure is well under credit_limit={credit_limit:.0f}"
+        )
+
+    # Cleanup
+    for oid in held_ids:
+        del state.open_orders[oid]
+    del state.open_orders[confirmed_id]
     state.customer_balances[customer.customer_id] = 0.0

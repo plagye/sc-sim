@@ -315,8 +315,8 @@ class TestReproducibility:
         tmp_path_factory: pytest.TempPathFactory,
         n: int,
         run_label: str,
-    ) -> int:
-        """Run *n* calendar days from a fresh state and return total event count."""
+    ) -> dict:
+        """Run *n* calendar days from a fresh state and return reproducibility fingerprint."""
         from flowform.cli import _run_day_loop
         from flowform.config import load_config
         from flowform.state import SimulationState
@@ -336,14 +336,43 @@ class TestReproducibility:
             total += len(evts)
             state.save()
 
-        return total
+        # Collect load_ids from written TMS files
+        load_ids: list[str] = []
+        for path in sorted(output_dir.glob("tms/*/loads_*.json")):
+            data = json.loads(path.read_text())
+            if isinstance(data, list):
+                for rec in data:
+                    if isinstance(rec, dict) and "load_id" in rec:
+                        load_ids.append(rec["load_id"])
+
+        # Collect first payment amount from written ERP files
+        first_payment: float | None = None
+        for path in sorted(output_dir.glob("erp/*/payments.json")):
+            data = json.loads(path.read_text())
+            if isinstance(data, list) and data:
+                rec = data[0]
+                if isinstance(rec, dict) and "payment_amount_pln" in rec:
+                    first_payment = rec["payment_amount_pln"]
+                    break
+
+        return {
+            "count": total,
+            "first_payment": first_payment,
+            "load_ids": sorted(load_ids),
+        }
 
     def test_reproducibility_14_days(self, tmp_path_factory: pytest.TempPathFactory) -> None:
         """Running 14 calendar days twice from the same seed yields the same
-        total event count (raw events, pre-noise).
+        total event count, first payment amount, and set of load IDs.
         """
-        count1 = self._run_n_days(tmp_path_factory, n=14, run_label="repro5_run1")
-        count2 = self._run_n_days(tmp_path_factory, n=14, run_label="repro5_run2")
-        assert count1 == count2, (
-            f"Event counts differ between runs: {count1} vs {count2}"
+        r1 = self._run_n_days(tmp_path_factory, n=14, run_label="repro5_run1")
+        r2 = self._run_n_days(tmp_path_factory, n=14, run_label="repro5_run2")
+        assert r1["count"] == r2["count"], (
+            f"Event counts differ between runs: {r1['count']} vs {r2['count']}"
+        )
+        assert r1["first_payment"] == r2["first_payment"], (
+            f"First payment amounts differ: {r1['first_payment']} vs {r2['first_payment']}"
+        )
+        assert r1["load_ids"] == r2["load_ids"], (
+            "Load ID sets differ between runs"
         )

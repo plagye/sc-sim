@@ -77,10 +77,10 @@ _SKIP_ORDER_STATUSES: frozenset[str] = frozenset({
 class BackorderEvent(BaseModel):
     """Emitted when a line (or portion of a line) cannot be filled from stock.
 
-    Routes to the ERP customer_orders file via ``event_type="customer_orders"``.
+    Routes to the ERP backorder_events file via ``event_type="backorder"``.
     """
 
-    event_type: Literal["customer_orders"] = "customer_orders"
+    event_type: Literal["backorder"] = "backorder"
     event_id: str
     backorder_date: str          # ISO date
     order_id: str
@@ -532,7 +532,15 @@ def run(
     events.extend(_run_escalation(state, sim_date))
 
     # --- Pass 2: Allocate open lines ---
-    allocatable = _collect_allocatable_lines(state)
+    # Opt-D: Reuse the sorted order list when open_orders hasn't changed.
+    h = hash(frozenset(state.open_orders.keys()))
+    if h != state._orders_snapshot_hash:
+        allocatable = _collect_allocatable_lines(state)
+        # Cache sorted IDs only (allocatable rebuilds the full list with refs)
+        state._sorted_order_ids = [a["order_id"] for a in allocatable]
+        state._orders_snapshot_hash = h
+    else:
+        allocatable = _collect_allocatable_lines(state)
     events.extend(_run_allocation(state, sim_date, allocatable))
 
     return events

@@ -7,9 +7,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
-import pytest
-
-from flowform.noise import injector
 from flowform.noise.injector import RATES, inject
 
 
@@ -220,7 +217,30 @@ def test_orphan_reference_replaces_order_id(monkeypatch: Any) -> None:
     rng = random.Random(0)
     event = _make_event(order_id="ORD-2026-000001")
     result = inject([event], cfg, rng)
-    assert result[0]["order_id"] == "ORD-9999-999999"
+    new_id = result[0]["order_id"]
+    # Must be replaced with a plausible historical order ID (not the original)
+    assert new_id != "ORD-2026-000001"
+    import re
+    assert re.match(r"ORD-20[0-2]\d-\d{6}", new_id), (
+        f"orphan_reference produced unexpected format: {new_id}"
+    )
+
+
+def test_orphan_reference_uses_variable_id(monkeypatch: Any) -> None:
+    """I3: Orphan references must produce varied IDs, not one hardcoded value."""
+    import re
+    cfg = _force_config("medium", "orphan_reference", 1.0, monkeypatch)
+    rng = random.Random(42)
+    events = [_make_event(order_id=f"ORD-2026-{i:06d}") for i in range(20)]
+    result = inject(events, cfg, rng)
+    orphaned_ids = [e["order_id"] for e in result if "order_id" in e]
+    assert len(set(orphaned_ids)) > 1, (
+        "All orphan references have the same ID — variable generation not working"
+    )
+    for oid in orphaned_ids:
+        assert re.match(r"ORD-20[0-2]\d-\d{6}", oid), (
+            f"Orphan ID does not match expected format: {oid}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +270,27 @@ def test_out_of_sequence_regresses_timestamp(monkeypatch: Any) -> None:
     assert date.fromisoformat(date_part) < date(2026, 3, 10)
 
 
+def test_out_of_sequence_timestamp_never_predates_simulation_start(
+    monkeypatch: Any,
+) -> None:
+    """M1: out_of_sequence noise must never produce a timestamp before 2026-01-05."""
+    from datetime import date
+    cfg = _force_config("medium", "out_of_sequence", 1.0, monkeypatch)
+    rng = random.Random(0)
+    # Use sim_date very close to simulation start
+    events = [_make_event(timestamp="2026-01-06T09:00:00Z") for _ in range(50)]
+    result = inject(events, cfg, rng)
+    floor = date(2026, 1, 5)
+    for ev in result:
+        ts = ev.get("timestamp", "")
+        if "T" not in ts:
+            continue
+        d = date.fromisoformat(ts.split("T")[0])
+        assert d >= floor, (
+            f"out_of_sequence produced timestamp {ts} before simulation start {floor}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Missing weight unit
 # ---------------------------------------------------------------------------
@@ -275,15 +316,31 @@ def test_missing_weight_unit_only_targets_load_event(monkeypatch: Any) -> None:
 def test_negative_quantity_snapshot_only_targets_snapshot(monkeypatch: Any) -> None:
     cfg = _force_config("medium", "negative_quantity_snapshot", 1.0, monkeypatch)
     rng = random.Random(0)
-    snapshot_ev = {"event_type": "inventory_snapshot", "quantity_on_hand": 50}
+    snapshot_ev = {
+        "event_type": "inventory_snapshot",
+        "positions": [{"sku": "FF-BL100-S316-PN25-FP", "on_hand": 50, "allocated": 10, "available": 40}],
+    }
     other_ev = _make_event(quantity_on_hand=50)
     result = inject([snapshot_ev, other_ev], cfg, rng)
 
     snap_result = next(e for e in result if e["event_type"] == "inventory_snapshot")
     other_result = next(e for e in result if e["event_type"] == "customer_order")
 
-    assert snap_result["quantity_on_hand"] < 0
+    assert snap_result["positions"][0]["on_hand"] < 0
     assert other_result["quantity_on_hand"] == 50
+
+
+def test_negative_quantity_snapshot_mutates_position(monkeypatch: Any) -> None:
+    """C2: negative_quantity_snapshot must mutate positions[*].on_hand, not top-level."""
+    cfg = _force_config("medium", "negative_quantity_snapshot", 1.0, monkeypatch)
+    rng = random.Random(0)
+    event = {
+        "event_type": "inventory_snapshot",
+        "positions": [{"sku": "FF-BL100-S316-PN25-FP", "on_hand": 50, "allocated": 10, "available": 40}],
+    }
+    result = inject([event], cfg, rng)
+    assert result[0]["positions"][0]["on_hand"] < 0
+    assert result[0]["positions"][0]["available"] <= 0
 
 
 # ---------------------------------------------------------------------------

@@ -100,8 +100,18 @@ def _get_profile(config: Config) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Fields that must never be deleted by missing_field noise (financially critical)
+_PROTECTED_FIELDS: frozenset[str] = frozenset({
+    "payment_amount_pln",
+    "balance_before_pln",
+    "balance_after_pln",
+    "payment_behaviour",
+    "payment_terms_days",
+})
+
+
 def _apply_missing_field(event: dict[str, Any], rng: random.Random) -> None:
-    keys = [k for k in event if k != "event_type"]
+    keys = [k for k in event if k != "event_type" and k not in _PROTECTED_FIELDS]
     if len(keys) < 1:
         return
     key_to_remove = rng.choice(keys)
@@ -178,9 +188,11 @@ def _apply_future_dated(event: dict[str, Any], rng: random.Random) -> None:
     event["timestamp"] = f"{new_date.isoformat()}T{time_part}"
 
 
-def _apply_orphan_reference(event: dict[str, Any], _rng: random.Random) -> None:
+def _apply_orphan_reference(event: dict[str, Any], rng: random.Random) -> None:
     if "order_id" in event:
-        event["order_id"] = "ORD-9999-999999"
+        year = rng.randint(2020, 2025)
+        num = rng.randint(1, 99999)
+        event["order_id"] = f"ORD-{year}-{num:06d}"
 
 
 def _apply_encoding_issue(event: dict[str, Any], rng: random.Random) -> None:
@@ -188,6 +200,9 @@ def _apply_encoding_issue(event: dict[str, Any], rng: random.Random) -> None:
         if field in event and isinstance(event[field], str):
             event[field] = event[field] + rng.choice(_ENCODING_CHARS)
             return  # Only one field per event
+
+
+_OUT_OF_SEQUENCE_FLOOR = date(2026, 1, 5)  # simulation start date — never go earlier
 
 
 def _apply_out_of_sequence(event: dict[str, Any], rng: random.Random) -> None:
@@ -200,7 +215,7 @@ def _apply_out_of_sequence(event: dict[str, Any], rng: random.Random) -> None:
     except ValueError:
         return
     delta = rng.randint(1, 2)
-    new_date = d - timedelta(days=delta)
+    new_date = max(_OUT_OF_SEQUENCE_FLOOR, d - timedelta(days=delta))
     event["timestamp"] = f"{new_date.isoformat()}T{time_part}"
 
 
@@ -212,12 +227,17 @@ def _apply_missing_weight_unit(event: dict[str, Any], _rng: random.Random) -> No
 
 
 def _apply_negative_quantity_snapshot(
-    event: dict[str, Any], _rng: random.Random
+    event: dict[str, Any], rng: random.Random
 ) -> None:
     if event.get("event_type") != "inventory_snapshot":
         return
-    if "quantity_on_hand" in event:
-        event["quantity_on_hand"] = -abs(event["quantity_on_hand"])
+    positions = event.get("positions")
+    if not isinstance(positions, list) or not positions:
+        return
+    pos = rng.choice(positions)
+    if "on_hand" in pos:
+        pos["on_hand"] = -abs(pos["on_hand"])
+        pos["available"] = -abs(pos.get("available", 0))
 
 
 def _apply_duplicate_load_id(
@@ -264,6 +284,10 @@ def inject(
 
     profile = _get_profile(config)
     rates = RATES[profile]
+
+    # Opt-C: Early exit when all rates are zero (e.g. custom zero-noise config)
+    if all(v == 0.0 for v in rates.values()):
+        return list(events)
 
     # Pre-collect lookup sets used by some noise types
     all_customer_ids: list[str] = [

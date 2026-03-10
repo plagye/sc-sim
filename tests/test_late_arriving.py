@@ -9,11 +9,9 @@ Coverage:
 
 from __future__ import annotations
 
-import random
 from datetime import date
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
@@ -131,6 +129,11 @@ SIM_DATE = date(2026, 3, 10)  # Tuesday
 
 def test_tms_late_timestamp_fraction(tmp_state: SimulationState, config) -> None:
     """~5% of TMS carrier/return events should be back-dated."""
+    # Verify that the probability is read from config (M2)
+    assert config.noise.tms_late_probability == 0.05
+    assert config.noise.erp_defer_probability == 0.02
+    assert config.noise.maintenance_probability == 0.045
+
     # Use 200 carrier_events to get a stable estimate
     events = [_make_carrier_event(SIM_DATE) for _ in range(200)]
     result = apply(events, tmp_state, config, SIM_DATE)
@@ -381,3 +384,32 @@ def test_no_crash_on_empty_events(tmp_state: SimulationState, config) -> None:
     result = apply([], tmp_state, config, SIM_DATE)
     assert result == []
     assert tmp_state.deferred_erp_movements == []
+
+
+def test_maintenance_burst_never_fires_on_saturday(
+    tmp_state: SimulationState, config
+) -> None:
+    """I1: Maintenance burst must not fire on a Saturday even when rng always returns 0.0."""
+    saturday = date(2026, 1, 3)  # Saturday
+    # Set previous month so the burst could fire if not guarded
+    tmp_state.tms_maintenance_fired_month = "2025-12"
+    original_month = tmp_state.tms_maintenance_fired_month
+
+    original_random = tmp_state.rng.random
+    tmp_state.rng.random = lambda: 0.0  # type: ignore[method-assign]
+    try:
+        events = [_make_load_event(saturday) for _ in range(3)]
+        result = apply(events, tmp_state, config, saturday)
+    finally:
+        tmp_state.rng.random = original_random  # type: ignore[method-assign]
+
+    # Burst must NOT have fired — month key must be unchanged
+    assert tmp_state.tms_maintenance_fired_month == original_month, (
+        "Maintenance burst fired on a Saturday — weekend guard is missing"
+    )
+    # No load_event should have been moved to sync_window '20' by the burst
+    load_events = [e for e in result if isinstance(e, dict) and e.get("event_type") == "load_event"]
+    for le in load_events:
+        assert le.get("sync_window") != "20", (
+            "load_event sync_window was set to '20' by maintenance burst on Saturday"
+        )

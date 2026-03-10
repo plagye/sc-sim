@@ -151,6 +151,9 @@ class NoiseProfile(str, Enum):
 
 class NoiseConfig(BaseModel):
     profile: NoiseProfile
+    erp_defer_probability: float = 0.02
+    tms_late_probability: float = 0.05
+    maintenance_probability: float = 0.045
 
 
 class DisruptionsConfig(BaseModel):

@@ -215,7 +215,8 @@ def run(
 
     Steps:
     1. Business-day guard (skip weekends and Polish public holidays).
-    2. Collect eligible orders (status ``"allocated"``, no ``load_id`` set).
+    2. Collect eligible orders (status ``"allocated"`` or ``"partially_allocated"``
+       with at least one line in ``"allocated"`` line_status, no ``load_id`` set).
     3. For each eligible order, create one shipment.
     4. Consolidate shipments into loads by ``(source_warehouse_id, carrier_code)``.
     5. Assign sync windows across the day's loads.
@@ -243,11 +244,18 @@ def run(
     eligible_orders: list[dict[str, Any]] = []
     for order in state.open_orders.values():
         status = order.get("status", "")
-        if status != "allocated":
-            continue
         if status in _SKIP_ORDER_STATUSES:
             continue
+        if status not in ("allocated", "partially_allocated"):
+            continue
         if order.get("load_id"):  # already planned
+            continue
+        # For partially_allocated orders, only include if at least one line is ready to ship
+        has_allocated_lines = any(
+            line.get("line_status") == "allocated"
+            for line in order.get("lines", [])
+        )
+        if not has_allocated_lines:
             continue
         eligible_orders.append(order)
 

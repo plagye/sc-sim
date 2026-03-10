@@ -196,6 +196,7 @@ class SimulationState:
         pending_pod: dict[str, dict[str, Any]] | None = None,
         deferred_erp_movements: list[dict[str, Any]] | None = None,
         tms_maintenance_fired_month: str = "",
+        supply_disruptions: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self._db_path = db_path
         self.sim_day = sim_day
@@ -237,6 +238,30 @@ class SimulationState:
         )
         # Calendar month (YYYY-MM) when TMS maintenance burst last fired; "" if never.
         self.tms_maintenance_fired_month: str = tms_maintenance_fired_month
+        # Active supply disruptions keyed by disruption_id.
+        # Each value is a dict with at least "end_date", "severity", "disruption_category".
+        self.supply_disruptions: dict[str, dict[str, Any]] = (
+            supply_disruptions if supply_disruptions is not None else {}
+        )
+
+        # ---------------------------------------------------------------------------
+        # Performance optimisation caches (ephemeral — not persisted to SQLite)
+        # ---------------------------------------------------------------------------
+
+        # Opt-A: Set of customer_ids whose credit exposure needs recomputing.
+        # Populated by allocation/modifications when order status changes.
+        # Cleared by credit.run() after processing.
+        self._credit_dirty: set[str] = set()
+
+        # Opt-B: Set of kv_state keys modified since the last save().
+        # _write_operational() only serialises keys in this set.
+        # Always serialises sim_meta and counters regardless.
+        self._dirty: set[str] = set()
+
+        # Opt-D: Sorted order-ID list + hash for allocation sort cache.
+        # When open_orders hasn't changed, reuse the previous sorted list.
+        self._sorted_order_ids: list[str] = []
+        self._orders_snapshot_hash: int = 0
 
     # ------------------------------------------------------------------
     # Public class methods
@@ -282,6 +307,7 @@ class SimulationState:
             "load": 1000,
             "return": 1000,
             "signal": 0,
+            "disruption": 0,
         }
         production_pipeline: list[dict[str, Any]] = []
 
@@ -310,6 +336,7 @@ class SimulationState:
             pending_pod={},
             deferred_erp_movements=[],
             tms_maintenance_fired_month="",
+            supply_disruptions={},
         )
         state.save()
         return state
@@ -404,6 +431,19 @@ class SimulationState:
             self.counters["movement"] = 1000
         self.counters["movement"] += 1
         return f"MOV-{self.counters['movement']}"
+
+    def mark_dirty(self, key: str) -> None:
+        """Mark a kv_state key as modified so _write_operational() serialises it.
+
+        Engines that mutate a specific field (e.g. 'inventory', 'open_orders')
+        call this to avoid a full re-serialisation of all 16 kv_state keys on
+        every save.  Keys 'sim_meta' and 'counters' are always serialised
+        regardless of dirty tracking.
+
+        Args:
+            key: A kv_state key name (e.g. 'inventory', 'open_orders').
+        """
+        self._dirty.add(key)
 
     # ------------------------------------------------------------------
     # Internal: schema creation
@@ -513,7 +553,7 @@ class SimulationState:
             )
 
     def _write_operational(self, conn: sqlite3.Connection) -> None:
-        ops: dict[str, Any] = {
+        all_ops: dict[str, Any] = {
             "inventory": self.inventory,
             "allocated": self.allocated,
             "open_orders": self.open_orders,
@@ -529,12 +569,26 @@ class SimulationState:
             "pending_pod": self.pending_pod,
             "deferred_erp_movements": self.deferred_erp_movements,
             "tms_maintenance_fired_month": self.tms_maintenance_fired_month,
+            "supply_disruptions": self.supply_disruptions,
         }
+
+        # Opt-B: Only write keys that changed, plus always-required keys.
+        # On first save (dirty set is empty), write everything.
+        always_write = {"counters", "schema_flags"}
+        if self._dirty:
+            ops = {k: v for k, v in all_ops.items() if k in self._dirty or k in always_write}
+        else:
+            ops = all_ops
+
         for key, value in ops.items():
             conn.execute(
-                "INSERT INTO kv_state (key, data) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET data = excluded.data",
+                "INSERT INTO kv_state (key, data) VALUES (?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET data = excluded.data",
                 (key, json.dumps(value)),
             )
+
+        # Clear dirty set after a successful write
+        self._dirty.clear()
 
     # ------------------------------------------------------------------
     # Internal: load from connection
@@ -611,6 +665,9 @@ class SimulationState:
         tms_maintenance_fired_month: str = (
             _kv("tms_maintenance_fired_month") or ""
         )
+        supply_disruptions: dict[str, dict[str, Any]] = (
+            _kv("supply_disruptions") or {}
+        )
 
         return cls(
             db_path=db_path,
@@ -637,4 +694,5 @@ class SimulationState:
             pending_pod=pending_pod,
             deferred_erp_movements=deferred_erp_movements,
             tms_maintenance_fired_month=tms_maintenance_fired_month,
+            supply_disruptions=supply_disruptions,
         )

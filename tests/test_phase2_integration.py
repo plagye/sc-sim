@@ -745,6 +745,10 @@ class TestPhase2Integration:
                 if ev.get("event_type") != "customer_order":
                     continue  # Skip backorder events (event_type="customer_orders")
                 priority = ev.get("priority")
+                # priority may be absent on noise-corrupted events (missing_field
+                # noise type intentionally drops random fields); skip those rows.
+                if priority is None:
+                    continue
                 assert priority in valid_priorities, (
                     f"Invalid priority {priority!r} on {sim_date}"
                 )

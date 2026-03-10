@@ -66,6 +66,9 @@ schema_evolution:
 
 noise:
   profile: "medium"
+  erp_defer_probability: 0.02
+  tms_late_probability: 0.05
+  maintenance_probability: 0.045
 
 disruptions:
   enabled: false

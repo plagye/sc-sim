@@ -475,6 +475,33 @@ def test_backorder_cancellation_after_30_days(state, config):
 
 
 # ---------------------------------------------------------------------------
+# Test: BackorderEvent has event_type "backorder" (Fix 4)
+# ---------------------------------------------------------------------------
+
+
+def test_backorder_event_type_is_backorder():
+    """BackorderEvent.event_type must be 'backorder', not 'customer_orders'.
+
+    This ensures backorder events are routed to backorder_events.json and do
+    not pollute customer_orders.json with a different event shape.
+    """
+    event = BackorderEvent(
+        event_id="test-uuid",
+        backorder_date="2026-01-05",
+        order_id="ORD-2026-999999",
+        order_line_id="ORD-2026-999999-L1",
+        sku="FF-GA15-CS-PN16-FL-MN",
+        quantity_backordered=5,
+        quantity_allocated=0,
+        backorder_reason="no_stock",
+        days_backordered=0,
+    )
+    assert event.event_type == "backorder", (
+        f"Expected event_type='backorder', got '{event.event_type}'"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 9: Credit-hold orders skipped entirely
 # ---------------------------------------------------------------------------
 

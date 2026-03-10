@@ -106,7 +106,9 @@ def _order_value_pln(
 
     total = 0.0
     for line in order.get("lines", []):
-        qty: int = line.get("quantity_ordered", 0)
+        qty_ordered: int = line.get("quantity_ordered", 0)
+        qty_shipped: int = line.get("quantity_shipped", 0)
+        qty: int = max(0, qty_ordered - qty_shipped)
         unit_price: float = line.get("unit_price", 0.0)
         total += qty * unit_price
 
@@ -130,11 +132,16 @@ def _compute_open_orders_value_pln(
     open_orders: dict[str, dict[str, Any]],
     exchange_rates: dict[str, float],
 ) -> float:
-    """Sum the PLN value of all open orders for a single customer.
+    """Sum the PLN value of active (non-held) open orders for a single customer.
 
-    Includes both ``confirmed`` and ``credit_hold`` orders — a held order
-    still represents goods committed to the customer (not yet shipped, so
-    not yet invoiced separately).
+    Deliberately excludes ``credit_hold`` orders from the calculation.
+    Held orders are already blocked from shipment and do not represent
+    incremental credit risk — including them in exposure creates a
+    catch-22 where held orders prevent their own release even after a
+    payment brings the balance below the limit.
+
+    Only ``confirmed``, ``allocated``, ``partially_allocated``,
+    ``backordered``, and ``partially_shipped`` orders are counted.
 
     Args:
         customer_id:  Target customer.
@@ -142,7 +149,7 @@ def _compute_open_orders_value_pln(
         exchange_rates: Rates from state.
 
     Returns:
-        Total open order value in PLN.
+        Total open order value in PLN (excluding held orders).
     """
     total = 0.0
     for order in open_orders.values():
@@ -150,6 +157,10 @@ def _compute_open_orders_value_pln(
             continue
         status = order.get("status", "")
         if status not in _OPEN_STATUSES:
+            continue
+        # Exclude held orders: they are already blocked and must not count
+        # toward the exposure that decides whether they can be released.
+        if status == "credit_hold":
             continue
         total += _order_value_pln(order, exchange_rates)
     return total
@@ -187,6 +198,9 @@ def run(
     """
     if not is_business_day(sim_date):
         return []
+
+    # Opt-A: Always clear the dirty set on business days, even with no open orders
+    state._credit_dirty.clear()
 
     if not state.open_orders:
         return []
@@ -236,6 +250,8 @@ def run(
         if status == "confirmed" and exposure_pln > credit_limit_pln:
             # Place on hold
             order["status"] = "credit_hold"
+            # Invalidate cache so subsequent orders for this customer recompute
+            exposure_cache.pop(customer_id, None)
             events.append(
                 CreditHoldEvent(
                     event_type="credit_hold",
@@ -253,6 +269,8 @@ def run(
         elif status == "credit_hold" and exposure_pln <= credit_limit_pln:
             # Release back to confirmed
             order["status"] = "confirmed"
+            # Invalidate cache so subsequent orders for this customer recompute
+            exposure_cache.pop(customer_id, None)
             events.append(
                 CreditReleaseEvent(
                     event_type="credit_release",

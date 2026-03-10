@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+import warnings
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -91,6 +92,7 @@ def _run_day_loop(
         production,
         returns,
         snapshots,
+        supply_disruptions,
         transfers,
     )
     from flowform.output.writer import write_events
@@ -102,6 +104,9 @@ def _run_day_loop(
 
     # Step 3: Production (self-guards to business days)
     all_events.extend(production.run(state, config, sim_date))  # type: ignore[arg-type]
+
+    # Step 3.5: Supply disruptions (gated by config.disruptions.enabled, business days only)
+    all_events.extend(supply_disruptions.run(state, config, sim_date))  # type: ignore[arg-type]
 
     # Step 4: Demand signals (self-guards to business days)
     all_events.extend(demand_signals.run(state, config, sim_date))  # type: ignore[arg-type]
@@ -263,6 +268,18 @@ def _simulate_days(config: object, n_days: int) -> None:  # type: ignore[type-ar
     except FileNotFoundError:
         print("No simulation state found. Run with --reset to initialise.")
         sys.exit(1)
+
+    output_dir = Path("output")
+    if state.sim_day > 0:  # type: ignore[attr-defined]
+        existing_json = list(output_dir.rglob("*.json")) if output_dir.exists() else []
+        if existing_json:
+            warnings.warn(
+                f"Output directory '{output_dir}' already contains "
+                f"{len(existing_json)} JSON files from a previous run. "
+                "TMS files use append mode — resuming without --reset will "
+                "produce duplicate load events. Run --reset first to start clean.",
+                stacklevel=2,
+            )
 
     for _ in range(n_days):
         next_date = state.current_date + timedelta(days=1)

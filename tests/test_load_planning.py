@@ -373,3 +373,80 @@ def test_load_event_type_routes_correctly(state, config):
     assert system == "tms"
     assert stem == f"loads_{event.sync_window}"
     assert event.sync_window in {"08", "14", "20"}
+
+
+# ---------------------------------------------------------------------------
+# Test 13: partially_allocated order eligible for load planning (Fix 3)
+# ---------------------------------------------------------------------------
+
+
+def test_partially_allocated_order_eligible_for_load(state, config):
+    """A partially_allocated order with at least one 'allocated' line must be
+    included in load planning so the ready portion ships immediately.
+
+    Previously only 'allocated' orders were picked up, leaving partial orders
+    stuck indefinitely even when some lines were ready to ship.
+    """
+    business_day = date(2026, 1, 5)
+    cid = _first_customer_id(state)
+    sku = _first_sku(state)
+    order_id = "ORD-PARTIAL-9999"
+
+    # Seed a partially_allocated order: one line allocated, one backordered
+    state.open_orders[order_id] = {
+        "event_type": "customer_order",
+        "event_id": str(uuid.uuid4()),
+        "order_id": order_id,
+        "customer_id": cid,
+        "simulation_date": "2026-01-05",
+        "timestamp": "2026-01-05T10:00:00",
+        "currency": "PLN",
+        "priority": "standard",
+        "status": "partially_allocated",
+        "requested_delivery_date": "2026-02-20",
+        "load_id": None,
+        "shipment_id": None,
+        "lines": [
+            {
+                "line_id": f"{order_id}-L1",
+                "sku": sku,
+                "quantity_ordered": 10,
+                "quantity_allocated": 5,
+                "quantity_shipped": 0,
+                "quantity_backordered": 5,
+                "unit_price": 500.0,
+                "line_status": "allocated",   # this line is ready
+                "warehouse_id": "W01",
+            },
+            {
+                "line_id": f"{order_id}-L2",
+                "sku": sku,
+                "quantity_ordered": 10,
+                "quantity_allocated": 0,
+                "quantity_shipped": 0,
+                "quantity_backordered": 10,
+                "unit_price": 500.0,
+                "line_status": "backordered",  # this line is waiting for stock
+                "warehouse_id": "W01",
+            },
+        ],
+    }
+
+    events = load_planning.run(state, config, business_day)
+
+    # The partially_allocated order must produce a load
+    load_ids = [e.load_id for e in events]
+    order_in_load = any(
+        order_id in e.order_ids for e in events
+    )
+    assert order_in_load, (
+        "partially_allocated order with an 'allocated' line must appear in a load"
+    )
+
+    # The order must have a load_id stamped on it
+    assert state.open_orders[order_id].get("load_id"), (
+        "load_id must be written back to the order"
+    )
+
+    # Cleanup
+    del state.open_orders[order_id]

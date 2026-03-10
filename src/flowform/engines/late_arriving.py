@@ -37,15 +37,11 @@ from flowform.state import SimulationState
 # Constants
 # ---------------------------------------------------------------------------
 
-_TMS_LATE_PROB: float = 0.05        # 5% of TMS events get back-dated
-_ERP_DEFER_PROB: float = 0.02       # 2% of inventory_movement events deferred
-_MAINTENANCE_PROB: float = 1 / 22   # ~once per month
-
 # Event types routed to TMS that carry a ``timestamp`` field.
 _TMS_TIMESTAMP_TYPES: frozenset[str] = frozenset({"carrier_event", "return_event"})
 
-# All TMS event types (for maintenance burst targeting load_event).
-_TMS_LOAD_TYPE: str = "load_event"
+# TMS event type targeted by the maintenance burst (load_event → sync_window "20").
+MAINTENANCE_BURST_TARGET_TYPE: str = "load_event"
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +127,11 @@ def apply(
     """
     result: list[Any] = list(events)
 
+    # Read probabilities from config
+    erp_prob: float = config.noise.erp_defer_probability
+    tms_prob: float = config.noise.tms_late_probability
+    maint_prob: float = config.noise.maintenance_probability
+
     # ------------------------------------------------------------------
     # Step A: Inject deferred ERP movements from the previous day first
     # ------------------------------------------------------------------
@@ -150,7 +151,7 @@ def apply(
     newly_deferred: list[dict[str, Any]] = []
 
     for idx, event in today_movements:
-        if state.rng.random() < _ERP_DEFER_PROB:
+        if state.rng.random() < erp_prob:
             deferred_indices.add(idx)
             # Store as dict for persistence
             if isinstance(event, dict):
@@ -174,7 +175,7 @@ def apply(
         etype = _get_event_type(event)
         if etype in _TMS_TIMESTAMP_TYPES:
             ts = _get_field(event, "timestamp")
-            if ts is not None and state.rng.random() < _TMS_LATE_PROB:
+            if ts is not None and state.rng.random() < tms_prob:
                 new_ts = _backdate_timestamp(ts, prev_biz_day)
                 event = _set_field(event, "timestamp", new_ts)
         updated_result.append(event)
@@ -185,13 +186,14 @@ def apply(
     # ------------------------------------------------------------------
     month_key = sim_date.strftime("%Y-%m")
     if (
-        state.tms_maintenance_fired_month != month_key
-        and state.rng.random() < _MAINTENANCE_PROB
+        is_business_day(sim_date)
+        and state.tms_maintenance_fired_month != month_key
+        and state.rng.random() < maint_prob
     ):
         state.tms_maintenance_fired_month = month_key
         burst_result: list[Any] = []
         for event in result:
-            if _get_event_type(event) == _TMS_LOAD_TYPE:
+            if _get_event_type(event) == MAINTENANCE_BURST_TARGET_TYPE:
                 event = _set_field(event, "sync_window", "20")
             burst_result.append(event)
         result = burst_result
