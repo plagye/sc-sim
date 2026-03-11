@@ -221,6 +221,10 @@ def _cmd_reset(config: object) -> None:  # type: ignore[type-arg]
         shutil.rmtree(output_dir)
 
     state = SimulationState.from_new(config)  # type: ignore[arg-type]
+
+    from flowform.master_data.export import write_master_data
+    write_master_data(state, output_dir)
+
     print(
         f"Reset complete. Simulation starts at {state.start_date}. "
         f"Catalog: {len(state.catalog)} SKUs, {len(state.customers)} customers."

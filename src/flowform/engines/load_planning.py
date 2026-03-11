@@ -36,23 +36,6 @@ from flowform.state import SimulationState
 # Constants
 # ---------------------------------------------------------------------------
 
-# Carrier selection weights by source warehouse
-_CARRIER_WEIGHTS_W01: dict[str, int] = {
-    "DHL": 30,
-    "DBSC": 30,
-    "RABEN": 25,
-    "GEODIS": 10,
-    "BALTIC": 5,
-}
-
-_CARRIER_WEIGHTS_W02: dict[str, int] = {
-    "DHL": 20,
-    "DBSC": 20,
-    "RABEN": 15,
-    "GEODIS": 10,
-    "BALTIC": 35,
-}
-
 # Order-level statuses that are NOT eligible for load planning
 _SKIP_ORDER_STATUSES: frozenset[str] = frozenset({
     "credit_hold",
@@ -63,6 +46,97 @@ _SKIP_ORDER_STATUSES: frozenset[str] = frozenset({
 
 # Weight conversion: kg → lbs
 _KG_TO_LBS: float = 2.20462
+
+# ---------------------------------------------------------------------------
+# NUTS2 region lookup — keyed by actual region strings from customers._COUNTRY_REGIONS
+# ---------------------------------------------------------------------------
+
+REGION_TO_NUTS2: dict[str, str] = {
+    # PL — Śląskie, Mazowieckie, Małopolskie, Łódźkie, Dolnośląskie,
+    #       Wielkopolskie, Pomorskie, Kujawsko-Pomorskie, Zachodniopomorskie
+    "Śląskie":             "PL-SL",
+    "Mazowieckie":         "PL-MZ",
+    "Małopolskie":         "PL-MA",
+    "Łódźkie":             "PL-LD",
+    "Dolnośląskie":        "PL-DS",
+    "Wielkopolskie":       "PL-WP",
+    "Pomorskie":           "PL-PM",
+    "Kujawsko-Pomorskie":  "PL-KP",
+    "Zachodniopomorskie":  "PL-ZP",
+    # DE — Bavaria, North Rhine-Westphalia, Baden-Württemberg, Hamburg,
+    #       Saxony, Brandenburg, Hesse, Lower Saxony, Bremen
+    "Bavaria":                  "DE-BY",
+    "North Rhine-Westphalia":   "DE-NW",
+    "Baden-Württemberg":        "DE-BW",
+    "Hamburg":                  "DE-HH",
+    "Saxony":                   "DE-SN",
+    "Brandenburg":              "DE-BB",
+    "Hesse":                    "DE-HE",
+    "Lower Saxony":             "DE-NI",
+    "Bremen":                   "DE-HB",
+    # CZ — Prague, South Moravia, Central Bohemia, Moravia-Silesia, Pilsen
+    "Prague":           "CZ-PR",
+    "South Moravia":    "CZ-JM",
+    "Central Bohemia":  "CZ-ST",
+    "Moravia-Silesia":  "CZ-MS",
+    "Pilsen":           "CZ-PL",
+    # NL — North Holland, South Holland, Zeeland, North Brabant, Gelderland
+    "North Holland":   "NL-NH",
+    "South Holland":   "NL-ZH",
+    "Zeeland":         "NL-ZE",
+    "North Brabant":   "NL-NB",
+    "Gelderland":      "NL-GE",
+    # NO — Vestland, Rogaland, Møre og Romsdal, Viken, Troms og Finnmark
+    "Vestland":          "NO-VL",
+    "Rogaland":          "NO-RO",
+    "Møre og Romsdal":   "NO-MR",
+    "Viken":             "NO-VK",
+    "Troms og Finnmark": "NO-TF",
+    # SE — Västra Götaland, Skåne, Stockholm, Norrland, Östergötland
+    "Västra Götaland":  "SE-O",
+    "Skåne":            "SE-M",
+    "Stockholm":        "SE-AB",
+    "Norrland":         "SE-AC",
+    "Östergötland":     "SE-E",
+    # FR — Île-de-France, Auvergne-Rhône-Alpes, Occitanie, Nouvelle-Aquitaine
+    "Île-de-France":         "FR-IDF",
+    "Auvergne-Rhône-Alpes":  "FR-ARA",
+    "Occitanie":             "FR-OCC",
+    "Nouvelle-Aquitaine":    "FR-NAQ",
+    # IT — Lombardy, Veneto, Emilia-Romagna, Tuscany, Lazio
+    "Lombardy":       "IT-LOM",
+    "Veneto":         "IT-VEN",
+    "Emilia-Romagna": "IT-EMR",
+    "Tuscany":        "IT-TOS",
+    "Lazio":          "IT-LAZ",
+}
+
+# Carrier selection weights by destination country code
+_CARRIER_WEIGHTS_BY_COUNTRY: dict[str, dict[str, int]] = {
+    # Nordic
+    "NO": {"DHL": 60, "GEODIS": 20, "DBSC": 20},
+    "SE": {"DHL": 60, "GEODIS": 20, "DBSC": 20},
+    # Western EU
+    "FR": {"GEODIS": 50, "DHL": 30, "DBSC": 20},
+    "IT": {"GEODIS": 50, "DHL": 30, "DBSC": 20},
+    "NL": {"GEODIS": 50, "DHL": 30, "DBSC": 20},
+    # CEE
+    "PL": {"RABEN": 50, "DBSC": 30, "DHL": 20},
+    "CZ": {"RABEN": 50, "DBSC": 30, "DHL": 20},
+    # DE
+    "DE": {"DBSC": 50, "DHL": 30, "RABEN": 20},
+}
+
+# Fallback weights when country is not in the table above
+_CARRIER_WEIGHTS_FALLBACK: dict[str, int] = {
+    "DHL": 40,
+    "DBSC": 30,
+    "RABEN": 20,
+    "GEODIS": 10,
+}
+
+# Weight threshold (kg) above which DHL gets a +20 bump
+_LARGE_SHIPMENT_KG: float = 500.0
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +167,7 @@ class LoadEvent(BaseModel):
     planned_date: str                      # ISO date
     priority: str                          # highest priority across orders in load
     customer_ids: list[str]                # deduplicated
+    destination_region: str = ""           # NUTS2 code e.g. "PL-SL", "DE-BY"
 
 
 # ---------------------------------------------------------------------------
@@ -129,32 +204,69 @@ def _dominant_warehouse(order: dict[str, Any]) -> str:
     return sorted(candidates)[0]
 
 
+def destination_region(customer: Any) -> str:
+    """Map a customer's region to a NUTS2 code.
+
+    Falls back to ``"{country_code}-XX"`` if the region is not found in
+    :data:`REGION_TO_NUTS2`.
+
+    Args:
+        customer: Customer object with ``region`` and ``country_code`` attributes.
+
+    Returns:
+        NUTS2 code string (e.g. ``"PL-SL"``).
+    """
+    region = getattr(customer, "region", "")
+    code = REGION_TO_NUTS2.get(region)
+    if code:
+        return code
+    country = getattr(customer, "country_code", "XX")
+    return f"{country}-XX"
+
+
 def _select_carrier(
     state: SimulationState,
     customer: Any,  # Customer dataclass
     source_warehouse_id: str,
+    total_weight_kg: float = 0.0,
 ) -> str:
     """Determine which carrier to use for a shipment.
 
-    If the customer has a ``preferred_carrier``, that carrier is used.
-    Otherwise, a carrier is drawn probabilistically from weights keyed to the
-    source warehouse.
+    Priority order:
+    1. Customer has a ``preferred_carrier`` → apply BALTIC gate.
+    2. BALTIC gate: BALTIC is only valid if customer segment is "Shipyards"
+       OR source warehouse is W02.  Otherwise override to RABEN.
+    3. No preferred carrier (or overridden): use country-based weighted selection.
+    4. Large-shipment override: if ``total_weight_kg > 500``, bump DHL by +20
+       before weighted draw.
 
     Args:
         state:               Mutable simulation state (RNG access).
-        customer:            Customer object (has ``preferred_carrier`` field).
+        customer:            Customer object.
         source_warehouse_id: The warehouse the shipment departs from.
+        total_weight_kg:     Total shipment weight in kg (for large-shipment logic).
 
     Returns:
         Carrier code string (e.g. ``"DHL"``).
     """
     preferred = getattr(customer, "preferred_carrier", "") or ""
+
     if preferred:
+        # Apply BALTIC gate: BALTIC only valid for Shipyards or W02
+        if preferred == "BALTIC":
+            segment = getattr(customer, "segment", "")
+            if segment != "Shipyards" and source_warehouse_id != "W02":
+                return "RABEN"
         return preferred
 
-    weights_map = (
-        _CARRIER_WEIGHTS_W02 if source_warehouse_id == "W02" else _CARRIER_WEIGHTS_W01
-    )
+    # Country-based weighted selection
+    country_code = getattr(customer, "country_code", "")
+    weights_map = dict(_CARRIER_WEIGHTS_BY_COUNTRY.get(country_code, _CARRIER_WEIGHTS_FALLBACK))
+
+    # Large-shipment override: bump DHL weight
+    if total_weight_kg > _LARGE_SHIPMENT_KG:
+        weights_map["DHL"] = weights_map.get("DHL", 0) + 20
+
     carrier_codes = list(weights_map.keys())
     carrier_weights = list(weights_map.values())
     return state.rng.choices(carrier_codes, weights=carrier_weights, k=1)[0]
@@ -285,7 +397,7 @@ def run(
 
         # Determine carrier for this shipment
         customer = customer_by_id.get(customer_id)
-        carrier_code = _select_carrier(state, customer, source_wh)
+        carrier_code = _select_carrier(state, customer, source_wh, total_weight_kg)
 
         shipments.append({
             "shipment_id": shipment_id,
@@ -342,6 +454,11 @@ def run(
             batch_orders = [state.open_orders[oid] for oid in batch_order_ids]
             priority = _highest_priority(batch_orders)
 
+            # Destination region: take from the first customer in this batch
+            first_customer_id = batch_customer_ids[0] if batch_customer_ids else ""
+            first_customer = customer_by_id.get(first_customer_id)
+            dest_region = destination_region(first_customer) if first_customer else ""
+
             load_record: dict[str, Any] = {
                 "load_id": load_id,
                 "status": "load_created",
@@ -361,6 +478,7 @@ def run(
                 "events": [],
                 "priority": priority,
                 "customer_ids": batch_customer_ids,
+                "destination_region": dest_region,
             }
             loads_data.append(load_record)
 
@@ -401,6 +519,7 @@ def run(
                 planned_date=load_record["planned_date"],
                 priority=load_record["priority"],
                 customer_ids=load_record["customer_ids"],
+                destination_region=load_record["destination_region"],
             )
         )
 

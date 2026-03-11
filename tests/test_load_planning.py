@@ -291,7 +291,11 @@ def test_weight_reported_in_lbs_for_baltic(state, config):
 
     import dataclasses
 
-    patched_customer = dataclasses.replace(customer, preferred_carrier="BALTIC")
+    # Patch both preferred_carrier and segment so the BALTIC gate passes
+    # (BALTIC is only valid for Shipyards or W02 shipments per routing rules)
+    patched_customer = dataclasses.replace(
+        customer, preferred_carrier="BALTIC", segment="Shipyards"
+    )
     # Swap out in the list
     original_customers = state.customers
     state.customers = [patched_customer] + state.customers[1:]

@@ -156,12 +156,22 @@ class TestResetMasterData:
         # DB should still exist (freshly written)
         assert (tmp_path / "state" / "simulation.db").exists()
 
-        # output/ should not exist (wiped) or be empty
+        # output/ should not exist (wiped) or contain only master data files.
+        # --reset writes static reference files to output/master/, so that
+        # directory is expected to exist with exactly 6 JSON files.
         output_dir = tmp_path / "output"
         if output_dir.exists():
             all_files = list(output_dir.rglob("*"))
             json_files = [f for f in all_files if f.is_file()]
-            assert json_files == [], f"output/ still has files after second --reset: {json_files}"
+            # Only master/*.json are permitted; no simulation-day files
+            non_master = [f for f in json_files if "master" not in f.parts]
+            assert non_master == [], (
+                f"output/ has unexpected non-master files after second --reset: {non_master}"
+            )
+            master_files = [f for f in json_files if "master" in f.parts]
+            assert len(master_files) == 6, (
+                f"Expected 6 master files after --reset, got {len(master_files)}: {master_files}"
+            )
 
     def test_reset_prints_catalog_count(self, reset_env: tuple[Path, str]) -> None:
         """``--reset`` stdout contains 'SKUs' and a number >= 2000."""

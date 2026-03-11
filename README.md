@@ -150,7 +150,3 @@ python -m flowform.cli --days 180
 python -m pytest tests/ -q        # 794 tests, ~100s
 ruff check src/ tests/            # lint
 ```
-
-## Performance
-
-See `docs/performance.md` for full benchmark table. 180-day run: approximately 0.8s/day on a modern development machine. Peak memory: ~8 MB.
