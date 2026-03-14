@@ -6,7 +6,7 @@ A synthetic B2B supply chain data generator that produces realistic, messy, mult
 
 ```bash
 git clone <repo-url>
-cd flowform-sim
+cd sc-sim
 python -m venv venv && source venv/bin/activate
 pip install -e ".[dev]"
 python -m flowform.cli --reset
