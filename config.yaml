@@ -71,4 +71,4 @@ noise:
   maintenance_probability: 0.045
 
 disruptions:
-  enabled: false
+  enabled: true
