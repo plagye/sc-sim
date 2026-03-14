@@ -1,6 +1,6 @@
 # FlowForm Industries — Supply Chain Simulation Engine
 
-A synthetic B2B supply chain data generator that produces realistic, messy, multi-system events (ERP, TMS, ADM, Forecast) across up to 180 simulated days. Built around a fictional industrial valve manufacturer (FlowForm Industries, Katowice, Poland), the engine models customer orders, inventory movements, carrier loads, payments, demand planning, and schema evolution. It is designed for data engineering practice — pipeline building, data quality handling, schema evolution, SCD dimensions, late-arriving data, and incremental load patterns.
+A synthetic B2B supply chain data generator that produces realistic, messy, multi-system events (ERP, TMS, ADM, Forecast). Built around a fictional industrial valve manufacturer (FlowForm Industries, Katowice, Poland), the engine models customer orders, inventory movements, carrier loads, payments, demand planning, and schema evolution. It is designed for data engineering practice — pipeline building, data quality handling, schema evolution, SCD dimensions, late-arriving data, and incremental load patterns.
 
 ## Quick Start
 
