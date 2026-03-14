@@ -23,9 +23,7 @@ python -m flowform.cli --status
 | `--until DATE` | Advance until `DATE` (YYYY-MM-DD) |
 | `--status` | Print simulation state summary without simulating |
 
-> **Always run `--reset` before the first `--days`.**
-
-> **Do NOT run `--days` on an existing output directory without `--reset` first.** TMS load files use append mode. Resuming without reset appends duplicate load events to the same-day TMS files (a warning is printed to stderr). Use `--reset` to start clean, or manage output directories manually.
+> Run `--reset` once before the very first `--days` to initialise state and master data. After that, run `--days 1` (or more) repeatedly to advance the simulation day by day. Each day writes to a new date-stamped subdirectory (`erp/YYYY-MM-DD/`, `tms/YYYY-MM-DD/`, etc.), so resuming is always safe — previously written files are never touched.
 
 ## Output Structure
 

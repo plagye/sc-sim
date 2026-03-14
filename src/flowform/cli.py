@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
-import warnings
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -272,18 +271,6 @@ def _simulate_days(config: object, n_days: int) -> None:  # type: ignore[type-ar
     except FileNotFoundError:
         print("No simulation state found. Run with --reset to initialise.")
         sys.exit(1)
-
-    output_dir = Path("output")
-    if state.sim_day > 0:  # type: ignore[attr-defined]
-        existing_json = list(output_dir.rglob("*.json")) if output_dir.exists() else []
-        if existing_json:
-            warnings.warn(
-                f"Output directory '{output_dir}' already contains "
-                f"{len(existing_json)} JSON files from a previous run. "
-                "TMS files use append mode — resuming without --reset will "
-                "produce duplicate load events. Run --reset first to start clean.",
-                stacklevel=2,
-            )
 
     for _ in range(n_days):
         next_date = state.current_date + timedelta(days=1)
