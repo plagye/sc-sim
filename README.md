@@ -22,8 +22,24 @@ python -m flowform.cli --status
 | `--days N` | Advance N calendar days from the current simulation position |
 | `--until DATE` | Advance until `DATE` (YYYY-MM-DD) |
 | `--status` | Print simulation state summary without simulating |
+| `--continuous` | Run indefinitely, one day at a time (resume from existing state) |
+| `--sleep N` | Seconds to sleep between days in `--continuous` mode (default: 1.0) |
 
 > Run `--reset` once before the very first `--days` to initialise state and master data. After that, run `--days 1` (or more) repeatedly to advance the simulation day by day. Each day writes to a new date-stamped subdirectory (`erp/YYYY-MM-DD/`, `tms/YYYY-MM-DD/`, etc.), so resuming is always safe — previously written files are never touched.
+
+### Continuous mode
+
+```bash
+python -m flowform.cli --continuous --sleep 30        # run forever, 30s between days
+python -m flowform.cli --continuous --days 90 --sleep 0  # run 90 days as fast as possible
+```
+
+Each day prints a status line:
+```
+[sim_day=42    date=2026-02-16  orders=48     loads=12]
+```
+
+Stop with `Ctrl-C` or `SIGTERM` — the current day completes and state is saved before exit.
 
 ## Output Structure
 
@@ -32,13 +48,14 @@ output/
   erp/YYYY-MM-DD/
     customer_orders.json          daily order batch (all segments)
     inventory_movements.json      picks, receipts, adjustments, returns
+    shipment_confirmations.json   one record per order on delivery (qty/value shipped)
     credit_events.json            holds and releases
     payments.json                 customer payment records
     backorder_events.json         backorder creation and release
     exchange_rates.json           daily EUR/PLN, USD/PLN
     schema_evolution_events.json  field activation audit trail
     inventory_snapshots.json      end-of-day warehouse positions
-    master_data_changes.json      SCD events (address, segment, terms)
+    master_data_changes.json      SCD events (address, segment, terms, credit limits)
     order_modifications.json      quantity/date/priority/line changes
     order_cancellations.json      full and partial cancellations
     production_completions.json   finished goods entering inventory
@@ -69,7 +86,11 @@ Key knobs in `config.yaml`:
 | `noise.erp_defer_probability` | 0.02 | Fraction of inventory movements deferred to next day |
 | `noise.tms_late_probability` | 0.05 | Fraction of TMS events back-dated to previous biz day |
 | `noise.maintenance_probability` | 0.045 | Probability of TMS maintenance burst per business day |
-| `disruptions.enabled` | `false` | Enable supply disruption events |
+| `disruptions.enabled` | `true` | Enable supply disruption events |
+| `credit_limit.enabled` | `true` | Enable quarterly credit limit growth reviews |
+| `credit_limit.growth_min` | 0.05 | Minimum credit limit growth per review (5%) |
+| `credit_limit.growth_max` | 0.15 | Maximum credit limit growth per review (15%) |
+| `credit_limit.max_multiplier` | 3.0 | Hard cap: limit never exceeds 3× initial value |
 | `payments.on_time_probability` | 0.82 | Fraction of on-time customer payments |
 | `demand.signal_probability_daily` | 0.05 | Bernoulli rate per trial per day |
 | `schema_evolution.sales_channel_from_day` | 60 | sim_day when `sales_channel` appears on orders |
@@ -88,7 +109,8 @@ Key knobs in `config.yaml`:
 | Partial fulfilment | Order lines can be split across multiple shipments and loads |
 | Data quality noise | Duplicates, missing fields, timezone errors, orphan references, encoding issues (configurable) |
 | Backorders and escalation | Lines escalate from standard→express after 14 days; auto-cancel after 30 days |
-| Credit hold cycles | Customer balance > limit → orders held; payment → release |
+| Credit hold cycles | Customer balance > limit → orders held; payment → release; quarterly limit growth prevents long-run death spiral |
+| Shipment confirmations | `shipment_confirmations.json` emitted on delivery — required to reconstruct `qty_shipped` and `line_revenue_pln` downstream |
 | Monthly cadence differences | ERP daily; TMS 3x/day; ADM signals per-event; Forecast monthly |
 | Maintenance bursts | Monthly TMS maintenance flushes all load events to sync window 20 |
 
@@ -145,6 +167,6 @@ python -m flowform.cli --days 180
 ## Running Tests
 
 ```bash
-python -m pytest tests/ -q        # 794 tests, ~100s
+python -m pytest tests/ -q        # 852 tests, ~110s
 ruff check src/ tests/            # lint
 ```

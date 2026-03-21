@@ -79,8 +79,8 @@ def test_credit_dirty_set_cleared_after_run(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_state_dirty_only_saves_changed_keys(tmp_path: Path) -> None:
-    """After marking only 'inventory' dirty, a save/reload must preserve open_orders."""
+def test_state_save_preserves_all_keys(tmp_path: Path) -> None:
+    """save() must always write every key; a second save must not lose open_orders."""
     from flowform.config import load_config
     from flowform.state import SimulationState
 
@@ -96,17 +96,17 @@ def test_state_dirty_only_saves_changed_keys(tmp_path: Path) -> None:
         "lines": [],
     }
 
-    # Do a full save to persist the order
+    # First save persists the order
     state.save()
 
-    # Now only mark inventory dirty (not open_orders)
-    state.mark_dirty("inventory")
-    state.save()  # Partial save — should not corrupt open_orders
+    # Second save (e.g. after only mutating inventory) must still persist open_orders
+    state.inventory["W01"]["FF-DUMMY-SKU"] = {"on_hand": 99, "allocated": 0, "in_transit": 0}
+    state.save()
 
-    # Reload and verify open_orders was preserved from the first full save
+    # Reload and verify open_orders was preserved across both saves
     state2 = SimulationState.from_db(config, db_path=db_path)
     assert "ORD-TEST-001" in state2.open_orders, (
-        "open_orders not preserved after partial (dirty-only) save"
+        "open_orders not preserved after second save"
     )
 
 

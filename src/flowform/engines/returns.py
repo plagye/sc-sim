@@ -21,7 +21,6 @@ from pydantic import BaseModel
 from flowform.calendar import is_business_day
 from flowform.config import Config
 from flowform.engines.inventory_movements import InventoryMovementEvent
-from flowform.engines.load_lifecycle import _advance_business_days
 from flowform.state import SimulationState
 
 # ---------------------------------------------------------------------------
@@ -155,7 +154,10 @@ def _make_restock_movement(
     # Grade-A restocked to primary warehouse W01; Grade-B to W02 (secondary/port stock)
     warehouse_id = "W01" if grade == "A" else "W02"
     wh = state.inventory.setdefault(warehouse_id, {})
-    wh[sku] = wh.get(sku, 0) + qty
+    if sku in wh:
+        wh[sku]["on_hand"] += qty
+    else:
+        wh[sku] = {"on_hand": qty, "allocated": 0, "in_transit": 0}
 
     movement_id = state.next_movement_id()
 

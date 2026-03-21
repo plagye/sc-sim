@@ -221,3 +221,58 @@ def test_convert_price_rounded_to_two_decimal_places():
     """Converted price must always be 2dp."""
     result = convert_price(1357.13, "EUR", _RATES)
     assert result == round(result, 2)
+
+
+# ---------------------------------------------------------------------------
+# Tests 19–23: Pricing soft cap (max_price parameter)
+# ---------------------------------------------------------------------------
+
+_WORST_CASE_SPEC = SKUSpec(
+    valve_type="Globe",
+    dn=300,
+    material="Duplex",
+    pressure_class="PN63",
+    connection="Welded",
+    actuation="Hydraulic",
+)
+
+
+def test_worst_case_uncapped_exceeds_cap():
+    """Globe/DN300/Duplex/PN63/Welded/Hydraulic raw price must exceed 25,000 PLN.
+
+    Confirms that the cap is meaningful — without it this spec would produce
+    a price well above the 25k threshold.
+    """
+    raw = base_price_pln(_WORST_CASE_SPEC, max_price=None)
+    assert raw > 25000.0, f"Expected raw price > 25000, got {raw}"
+
+
+def test_worst_case_capped_at_25000():
+    """Globe/DN300/Duplex/PN63/Welded/Hydraulic capped at 25,000 PLN."""
+    capped = base_price_pln(_WORST_CASE_SPEC, max_price=25000.0)
+    assert capped == 25000.0, f"Expected exactly 25000.0, got {capped}"
+
+
+def test_cap_does_not_affect_low_price():
+    """Ball/DN50/CS/PN16/Flanged/Manual = 850 PLN, unaffected by the 25k cap."""
+    spec = _spec()  # reference anchor spec
+    result = base_price_pln(spec, max_price=25000.0)
+    assert result == 850.0, f"Expected 850.0, got {result}"
+
+
+def test_all_catalog_skus_within_cap():
+    """Every valid catalog SKU must be <= 25,000 PLN when the cap is applied."""
+    from flowform.catalog.constraints import get_all_valid_specs
+
+    cap = 25000.0
+    for spec in get_all_valid_specs():
+        price = base_price_pln(spec, max_price=cap)
+        assert price <= cap, (
+            f"SKU {spec} produced price {price} > cap {cap}"
+        )
+
+
+def test_cap_none_preserves_existing_behaviour():
+    """Passing max_price=None must yield the same result as the original call."""
+    spec = _spec()  # Ball/DN50/CS/PN16/Flanged/Manual
+    assert base_price_pln(spec, max_price=None) == 850.0

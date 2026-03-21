@@ -100,7 +100,7 @@ def _make_load_event(sim_date: date, sync_window: str = "08") -> dict[str, Any]:
 
 def _make_inventory_movement(sim_date: date) -> dict[str, Any]:
     return {
-        "event_type": "inventory_movement",
+        "event_type": "inventory_movements",
         "event_id": "evt-inv-001",
         "movement_id": "MOV-1001",
         "movement_type": "receipt",
@@ -155,7 +155,7 @@ def test_tms_late_timestamp_only_tms_events(tmp_state: SimulationState, config) 
     result = apply(events, tmp_state, config, SIM_DATE)
 
     # After apply, deferred ones are removed, but non-deferred keep original timestamp
-    erp_in_result = [e for e in result if isinstance(e, dict) and e.get("event_type") == "inventory_movement"]
+    erp_in_result = [e for e in result if isinstance(e, dict) and e.get("event_type") == "inventory_movements"]
     for e in erp_in_result:
         assert e["timestamp"].startswith(SIM_DATE.isoformat()), (
             f"ERP event timestamp was back-dated: {e['timestamp']}"
@@ -187,7 +187,7 @@ def test_erp_deferred_fraction(tmp_state: SimulationState, config) -> None:
 
     inv_in_result = sum(
         1 for e in result
-        if isinstance(e, dict) and e.get("event_type") == "inventory_movement"
+        if isinstance(e, dict) and e.get("event_type") == "inventory_movements"
     )
     withheld = 200 - inv_in_result
     assert 0 <= withheld <= 15, f"Expected 0–15 withheld, got {withheld}"
@@ -200,7 +200,7 @@ def test_erp_deferred_stored_in_state(tmp_state: SimulationState, config) -> Non
 
     inv_in_result = sum(
         1 for e in result
-        if isinstance(e, dict) and e.get("event_type") == "inventory_movement"
+        if isinstance(e, dict) and e.get("event_type") == "inventory_movements"
     )
     withheld = 200 - inv_in_result
     assert len(tmp_state.deferred_erp_movements) == withheld
@@ -228,7 +228,7 @@ def test_erp_deferred_injected_next_day(tmp_state: SimulationState, config) -> N
     # Deferred events from day 1 should be prepended
     injected = [
         e for e in result_day2
-        if isinstance(e, dict) and e.get("event_type") == "inventory_movement"
+        if isinstance(e, dict) and e.get("event_type") == "inventory_movements"
         and e.get("simulation_date") == day1.isoformat()
     ]
     assert len(injected) == deferred_count, (

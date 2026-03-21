@@ -100,13 +100,24 @@ def _get_profile(config: Config) -> str:
 # ---------------------------------------------------------------------------
 
 
-# Fields that must never be deleted by missing_field noise (financially critical)
+# Fields that must never be deleted by missing_field noise.
+# Includes financially critical fields AND routing/structural keys whose
+# absence makes an event unwritable (e.g. sync_window routes TMS load files).
 _PROTECTED_FIELDS: frozenset[str] = frozenset({
     "payment_amount_pln",
     "balance_before_pln",
     "balance_after_pln",
     "payment_behaviour",
     "payment_terms_days",
+    "sync_window",       # TMS load routing key — writer rejects events without it
+})
+
+# Event types that are exempt from all noise injection.
+# These are operational/confirmation events that must remain pristine.
+# Crucially, exempting an event SKIPS the rng.random() Bernoulli trial too,
+# preserving the RNG sequence for all non-exempt events.
+_NOISE_EXEMPT_EVENT_TYPES: frozenset[str] = frozenset({
+    "shipment_confirmation",
 })
 
 
@@ -127,21 +138,21 @@ def _apply_wrong_timezone(event: dict[str, Any], rng: random.Random) -> None:
 
 
 def _apply_sku_case_error(event: dict[str, Any], rng: random.Random) -> None:
-    sku = event.get("sku_id")
+    sku = event.get("sku")
     if not isinstance(sku, str):
         return
     choice = rng.randint(0, 2)
     if choice == 0:
-        event["sku_id"] = sku.lower()
+        event["sku"] = sku.lower()
     elif choice == 1:
-        event["sku_id"] = sku.upper()
+        event["sku"] = sku.upper()
     else:
         # Insert space before first '-'
         idx = sku.find("-")
         if idx >= 0:
-            event["sku_id"] = sku[:idx] + " " + sku[idx:]
+            event["sku"] = sku[:idx] + " " + sku[idx:]
         else:
-            event["sku_id"] = sku.lower()
+            event["sku"] = sku.lower()
 
 
 def _apply_customer_id_mismatch(
@@ -235,9 +246,9 @@ def _apply_negative_quantity_snapshot(
     if not isinstance(positions, list) or not positions:
         return
     pos = rng.choice(positions)
-    if "on_hand" in pos:
-        pos["on_hand"] = -abs(pos["on_hand"])
-        pos["available"] = -abs(pos.get("available", 0))
+    if "quantity_on_hand" in pos:
+        pos["quantity_on_hand"] = -abs(pos["quantity_on_hand"])
+        pos["quantity_available"] = -abs(pos.get("quantity_available", 0))
 
 
 def _apply_duplicate_load_id(
@@ -313,6 +324,8 @@ def inject(
             continue
 
         for event in result:
+            if event.get("event_type") in _NOISE_EXEMPT_EVENT_TYPES:
+                continue  # Skip without consuming an RNG call
             if rng.random() >= rate:
                 continue
 
@@ -348,6 +361,8 @@ def inject(
         final: list[dict[str, Any]] = []
         for event in result:
             final.append(event)
+            if event.get("event_type") in _NOISE_EXEMPT_EVENT_TYPES:
+                continue  # Skip duplicate trial without consuming an RNG call
             if rng.random() < dup_rate:
                 final.append(dict(event))
         return final

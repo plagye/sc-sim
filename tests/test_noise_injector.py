@@ -134,7 +134,7 @@ def test_wrong_timezone_replaces_Z(monkeypatch: Any) -> None:
 # SKU case error
 # ---------------------------------------------------------------------------
 
-def test_sku_case_error_mutates_sku_id(monkeypatch: Any) -> None:
+def test_sku_case_error_mutates_sku(monkeypatch: Any) -> None:
     cfg = _force_config("medium", "sku_case_error", 1.0, monkeypatch)
     # Run multiple RNG seeds to guarantee at least one produces a mutation
     # (upper() on an already-uppercase string is a no-op, so we try seeds)
@@ -142,12 +142,12 @@ def test_sku_case_error_mutates_sku_id(monkeypatch: Any) -> None:
     found_mutation = False
     for seed in range(10):
         rng = random.Random(seed)
-        event = _make_event(sku_id=original)
+        event = _make_event(sku=original)
         result = inject([event], cfg, rng)
-        if result[0]["sku_id"] != original:
+        if result[0]["sku"] != original:
             found_mutation = True
             break
-    assert found_mutation, "sku_case_error never mutated the sku_id across 10 seeds"
+    assert found_mutation, "sku_case_error never mutated the sku across 10 seeds"
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +318,7 @@ def test_negative_quantity_snapshot_only_targets_snapshot(monkeypatch: Any) -> N
     rng = random.Random(0)
     snapshot_ev = {
         "event_type": "inventory_snapshot",
-        "positions": [{"sku": "FF-BL100-S316-PN25-FP", "on_hand": 50, "allocated": 10, "available": 40}],
+        "positions": [{"sku": "FF-BL100-S316-PN25-FP", "quantity_on_hand": 50, "quantity_allocated": 10, "quantity_available": 40}],
     }
     other_ev = _make_event(quantity_on_hand=50)
     result = inject([snapshot_ev, other_ev], cfg, rng)
@@ -326,21 +326,21 @@ def test_negative_quantity_snapshot_only_targets_snapshot(monkeypatch: Any) -> N
     snap_result = next(e for e in result if e["event_type"] == "inventory_snapshot")
     other_result = next(e for e in result if e["event_type"] == "customer_order")
 
-    assert snap_result["positions"][0]["on_hand"] < 0
+    assert snap_result["positions"][0]["quantity_on_hand"] < 0
     assert other_result["quantity_on_hand"] == 50
 
 
 def test_negative_quantity_snapshot_mutates_position(monkeypatch: Any) -> None:
-    """C2: negative_quantity_snapshot must mutate positions[*].on_hand, not top-level."""
+    """C2: negative_quantity_snapshot must mutate positions[*].quantity_on_hand, not top-level."""
     cfg = _force_config("medium", "negative_quantity_snapshot", 1.0, monkeypatch)
     rng = random.Random(0)
     event = {
         "event_type": "inventory_snapshot",
-        "positions": [{"sku": "FF-BL100-S316-PN25-FP", "on_hand": 50, "allocated": 10, "available": 40}],
+        "positions": [{"sku": "FF-BL100-S316-PN25-FP", "quantity_on_hand": 50, "quantity_allocated": 10, "quantity_available": 40}],
     }
     result = inject([event], cfg, rng)
-    assert result[0]["positions"][0]["on_hand"] < 0
-    assert result[0]["positions"][0]["available"] <= 0
+    assert result[0]["positions"][0]["quantity_on_hand"] < 0
+    assert result[0]["positions"][0]["quantity_available"] <= 0
 
 
 # ---------------------------------------------------------------------------
@@ -420,3 +420,49 @@ def test_inject_is_deterministic() -> None:
     result2 = inject(events, cfg, random.Random(99))
 
     assert result1 == result2
+
+
+# ---------------------------------------------------------------------------
+# Exempt event types
+# ---------------------------------------------------------------------------
+
+def test_shipment_confirmation_exempt_from_noise() -> None:
+    """shipment_confirmation events must never be mutated or duplicated by noise."""
+    cfg = _make_config("heavy")
+
+    shipment_event: dict = {
+        "event_type": "shipment_confirmation",
+        "event_id": "SC-001",
+        "shipment_id": "SHP-001",
+        "load_id": "LOAD-001",
+        "customer_id": "CUST-001",
+        "confirmed_at": "2026-03-10T14:00:00Z",
+    }
+    order_event: dict = {
+        "event_type": "customer_order",
+        "event_id": "EV-ORD-001",
+        "order_id": "ORD-2026-000001",
+        "customer_id": "CUST-001",
+        "unit_price": 1000.0,
+        "timestamp": "2026-03-10T08:00:00Z",
+        "sku_id": "FF-GATE50-CS-PN16-FL-MAN",
+    }
+
+    # Use many runs with different seeds to be sure the exemption is robust
+    shipment_original = dict(shipment_event)
+    for seed in range(20):
+        result = inject([dict(shipment_event), dict(order_event)], cfg, random.Random(seed))
+
+        # All shipment_confirmation events in output must be unchanged
+        sc_events = [e for e in result if e.get("event_type") == "shipment_confirmation"]
+        assert len(sc_events) == 1, (
+            f"Expected exactly 1 shipment_confirmation, got {len(sc_events)} (seed={seed})"
+        )
+        assert sc_events[0] == shipment_original, (
+            f"shipment_confirmation was mutated by noise injector (seed={seed}): {sc_events[0]}"
+        )
+
+    # The customer_order event should have been subject to noise (may be mutated)
+    # We just verify the inject call didn't crash and returned something for it
+    final_result = inject([dict(order_event)], cfg, random.Random(0))
+    assert len(final_result) >= 1  # at minimum the original, possibly duplicated

@@ -54,6 +54,7 @@ _ELIGIBLE_STATUSES: frozenset[str] = frozenset({
     "allocated",
     "partially_allocated",
     "backordered",
+    "partially_shipped",
 })
 
 # Line statuses that are still active (can be touched)
@@ -163,7 +164,13 @@ def _return_allocated_to_inventory(
     warehouse_id = _warehouse_for_line(line)
     sku = line["sku"]
     wh_inv = state.inventory.setdefault(warehouse_id, {})
-    wh_inv[sku] = wh_inv.get(sku, 0) + allocated
+    # Unallocate: the units are still physically in the warehouse (on_hand unchanged);
+    # we just reduce the reservation counter.
+    pos = wh_inv.get(sku)
+    if pos is None:
+        pos = {"on_hand": 0, "allocated": 0, "in_transit": 0}
+        wh_inv[sku] = pos
+    pos["allocated"] = max(0, pos["allocated"] - allocated)
 
     unpick_events.append(
         _make_event(
@@ -281,6 +288,8 @@ def _apply_quantity_change(
         line["quantity_backordered"] = backordered + extra
         if line.get("line_status") == "allocated":
             line["line_status"] = "partially_allocated"
+        elif line.get("line_status") == "open":
+            line["line_status"] = "backordered"
     else:
         # Decrease: remove from backordered first, then from allocated if needed
         reduction = old_qty - new_qty
@@ -289,13 +298,17 @@ def _apply_quantity_change(
 
         remaining_reduction = reduction - bo_reduction
         if remaining_reduction > 0:
-            # Need to return some allocated stock to inventory
+            # Need to release some reserved stock (unallocate it — on_hand unchanged)
             alloc_reduction = min(allocated, remaining_reduction)
             line["quantity_allocated"] = allocated - alloc_reduction
             _warehouse_return = _warehouse_for_line(line)
             sku = line["sku"]
             wh_inv = state.inventory.setdefault(_warehouse_return, {})
-            wh_inv[sku] = wh_inv.get(sku, 0) + alloc_reduction
+            pos = wh_inv.get(sku)
+            if pos is None:
+                pos = {"on_hand": 0, "allocated": 0, "in_transit": 0}
+                wh_inv[sku] = pos
+            pos["allocated"] = max(0, pos["allocated"] - alloc_reduction)
 
             if alloc_reduction > 0:
                 unpick_events.append(
@@ -476,6 +489,7 @@ def _apply_line_addition(
     state: SimulationState,
     order: dict[str, Any],
     sim_date: date,
+    config: Config | None = None,
 ) -> OrderModificationEvent | None:
     """Add a new line to an open order.
 
@@ -509,7 +523,8 @@ def _apply_line_addition(
     unit_price = 0.0
     for entry in state.catalog:
         if entry.sku == sku:
-            pln_price = _pricing.base_price_pln(entry.spec)
+            max_price = config.catalog.max_unit_price_pln if config is not None else None
+            pln_price = _pricing.base_price_pln(entry.spec, max_price)
             discounted = _pricing.apply_customer_discount(pln_price, discount_pct)
             unit_price = _pricing.convert_price(discounted, currency, rates)
             break
@@ -680,7 +695,7 @@ def run(
         elif mod_type == "line_removal":
             event = _apply_line_removal(state, order, sim_date, unpick_events)
         elif mod_type == "line_addition":
-            event = _apply_line_addition(state, order, sim_date)
+            event = _apply_line_addition(state, order, sim_date, config)
 
         if event is not None:
             events.append(event)

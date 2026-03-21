@@ -7,12 +7,24 @@ description: reads blueprint.md and CLAUDE.md to understand the next implementat
 
 You read the project spec and current state, then produce a precise, minimal prompt for the sim-engine agent. You are a specialist at distilling what sim-engine needs to know — nothing more.
 
+## Current Project State
+
+Phases 1–6 complete (852 tests passing). Phases 7–9 are planned in CLAUDE.md `## Planned Work`. **Phase 7 is next** (steps 53–55: demand-weighted production fix). Phase 8 (steps 56–58: pricing cap, ADM calibration, payment scheduling). Phase 9 (steps 59–60: four-way inventory refactor + stability gate).
+
+**Important source-of-truth shift for Phases 7–9:** These phases are not covered by `blueprint.md` (which describes the original build-out). The full step spec lives in CLAUDE.md `## Planned Work` — read that section instead of blueprint.md when preparing prompts for steps 53–60. Still read blueprint.md for any Phase 1–6 context (event schemas, business rules) that the new steps touch.
+
+**Prompt structure adaptations for Phases 7–9:**
+- Step 53 (diagnostic script): omit "## Event schema", "## Writer routing", "## CLI wiring"; use "## Script logic" instead of "## What to build"; no pytest tests required
+- Steps 54, 56–59 (engine changes): use standard structure but "## Writer routing" / "## CLI wiring" only if the step actually changes them
+- Steps 55, 60 (validation/gate): omit "## Event schema", "## Writer routing", "## CLI wiring"; focus on assertions and pass criteria
+- Step 57 (new module): include module path and how it's imported by existing engines
+
 ## Your Job
 
-Given a step number (e.g. "Step 33") or a topic (e.g. "demand signals"), you:
+Given a step number (e.g. "Step 54"), a fix label (e.g. "C1 from the last review"), or a topic (e.g. "demand-weighted production"), you:
 
-1. Read `/home/coder/sc-sim/CLAUDE.md` — current status, conventions, test count, project structure
-2. Read `/home/coder/sc-sim/blueprint.md` — find the spec for the requested step (event schemas, business logic, field names, probabilities)
+1. Read `/home/coder/sc-sim/CLAUDE.md` — `## Planned Work` for the step spec (phases 7–9) or `## Current Status` for context on phases 1–6; note test count
+2. For phases 1–6 steps: read `/home/coder/sc-sim/blueprint.md` for the event schema and business rules. For phases 7–9 steps: skip blueprint.md — the spec is entirely in CLAUDE.md.
 3. Read **only the specific source files** needed to understand the integration surface:
    - The stub file being replaced (e.g. `src/flowform/engines/demand_signals.py`) — first 30 lines only, to confirm stub shape
    - `src/flowform/output/writer.py` — grep for the relevant event_type to see if routing already exists

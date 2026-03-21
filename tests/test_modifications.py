@@ -505,13 +505,15 @@ def test_line_removal_returns_allocated_inventory(state, config):
     order_id = "ORD-LR-001"
 
     allocated_qty = 25
-    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_B] = 10  # known starting level
+    # Set known starting inventory position for _SKU_B
+    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_B] = {"on_hand": 35, "allocated": allocated_qty, "in_transit": 0}
 
     line1 = _make_line(order_id, 1, _SKU_A, 50)
     line2 = _make_line(order_id, 2, _SKU_B, 30, quantity_allocated=allocated_qty, line_status="allocated")
     state.open_orders[order_id] = _make_order(order_id, customer_id, lines=[line1, line2])
 
-    inventory_before = state.inventory[_WAREHOUSE].get(_SKU_B, 0)
+    pos_b = state.inventory[_WAREHOUSE].get(_SKU_B)
+    inventory_before = (pos_b["on_hand"] - pos_b["allocated"]) if pos_b else 0
 
     original_random = state.rng.random
     original_choices = state.rng.choices
@@ -547,11 +549,12 @@ def test_line_removal_returns_allocated_inventory(state, config):
 
     assert len(removal_events) == 1, f"Expected 1 line_removal event, got {len(removal_events)}"
 
-    # The removed line had _SKU_B allocated — that should be returned
+    # The removed line had _SKU_B allocated — the reservation should be released
     # line2 has qty=30 and allocated=25; it should be the one removed (smaller qty)
-    inventory_after = state.inventory[_WAREHOUSE].get(_SKU_B, 0)
+    pos_b_after = state.inventory[_WAREHOUSE].get(_SKU_B)
+    inventory_after = (pos_b_after["on_hand"] - pos_b_after["allocated"]) if pos_b_after else 0
     assert inventory_after == inventory_before + allocated_qty, (
-        f"Expected inventory {_SKU_B} = {inventory_before + allocated_qty}, "
+        f"Expected available inventory {_SKU_B} = {inventory_before + allocated_qty}, "
         f"got {inventory_after}"
     )
 
@@ -626,10 +629,10 @@ def test_full_cancellation_cancels_all_lines_and_returns_inventory(state, config
 
     allocated_a = 15
     allocated_b = 8
-    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = 5
-    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_B] = 5
-    inv_a_before = state.inventory[_WAREHOUSE][_SKU_A]
-    inv_b_before = state.inventory[_WAREHOUSE][_SKU_B]
+    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = {"on_hand": 20, "allocated": allocated_a, "in_transit": 0}
+    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_B] = {"on_hand": 13, "allocated": allocated_b, "in_transit": 0}
+    inv_a_before = state.inventory[_WAREHOUSE][_SKU_A]["on_hand"] - state.inventory[_WAREHOUSE][_SKU_A]["allocated"]
+    inv_b_before = state.inventory[_WAREHOUSE][_SKU_B]["on_hand"] - state.inventory[_WAREHOUSE][_SKU_B]["allocated"]
 
     line1 = _make_line(order_id, 1, _SKU_A, 20, quantity_allocated=allocated_a, line_status="allocated")
     line2 = _make_line(order_id, 2, _SKU_B, 10, quantity_allocated=allocated_b, line_status="allocated")
@@ -681,9 +684,13 @@ def test_full_cancellation_cancels_all_lines_and_returns_inventory(state, config
             )
         assert state.open_orders[order_id]["status"] == "cancelled"
 
-        # Inventory must have been returned
-        assert state.inventory[_WAREHOUSE][_SKU_A] == inv_a_before + allocated_a
-        assert state.inventory[_WAREHOUSE][_SKU_B] == inv_b_before + allocated_b
+        # Available inventory must have been restored (allocated reduced)
+        pos_a = state.inventory[_WAREHOUSE][_SKU_A]
+        pos_b = state.inventory[_WAREHOUSE][_SKU_B]
+        avail_a = pos_a["on_hand"] - pos_a["allocated"]
+        avail_b = pos_b["on_hand"] - pos_b["allocated"]
+        assert avail_a == inv_a_before + allocated_a
+        assert avail_b == inv_b_before + allocated_b
 
     # At minimum: event has non-empty cancelled_lines and total_quantity_cancelled > 0
     assert len(canc.cancelled_lines) > 0
@@ -702,8 +709,8 @@ def test_partial_cancellation_cancels_subset_of_lines(state, config):
     customer_id = state.customers[0].customer_id
     order_id = "ORD-PARTCANC-001"
 
-    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = 0
-    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_B] = 0
+    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = {"on_hand": 13, "allocated": 13, "in_transit": 0}
+    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_B] = {"on_hand": 5, "allocated": 5, "in_transit": 0}
 
     line1 = _make_line(order_id, 1, _SKU_A, 20, quantity_allocated=10, line_status="allocated")
     line2 = _make_line(order_id, 2, _SKU_B, 15, quantity_allocated=5, line_status="allocated")

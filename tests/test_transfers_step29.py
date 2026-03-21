@@ -13,6 +13,7 @@ Covers demand-pull replenishment from W01 to W02:
 
 from __future__ import annotations
 
+import copy
 import math
 import random
 from datetime import date
@@ -86,9 +87,15 @@ def _force_gate_block(state: SimulationState) -> None:
 def _add_sku(state: SimulationState, sku: str, w01: int = 0, w02: int = 0) -> None:
     """Set inventory levels for a single SKU in W01 and/or W02."""
     if w01 > 0:
-        state.inventory.setdefault("W01", {})[sku] = w01
+        state.inventory.setdefault("W01", {})[sku] = {"on_hand": w01, "allocated": 0, "in_transit": 0}
     if w02 > 0:
-        state.inventory.setdefault("W02", {})[sku] = w02
+        state.inventory.setdefault("W02", {})[sku] = {"on_hand": w02, "allocated": 0, "in_transit": 0}
+
+
+def _inv(state: SimulationState, wh: str, sku: str) -> int:
+    """Get on_hand quantity from the new dict format."""
+    pos = state.inventory.get(wh, {}).get(sku)
+    return pos["on_hand"] if pos else 0
 
 
 # ---------------------------------------------------------------------------
@@ -123,8 +130,8 @@ def test_holiday_guard_returns_empty(state, config):
 def test_no_eligible_skus_adequately_stocked(state, config):
     """W01=100, W02=40. threshold=ceil(0.30*100)=30. 40>=30 => not eligible."""
     sku = "FF-GT50-CS-PN16-FL-MN"
-    state.inventory["W01"] = {sku: 100}
-    state.inventory["W02"] = {sku: 40}
+    state.inventory["W01"] = {sku: {"on_hand": 100, "allocated": 0, "in_transit": 0}}
+    state.inventory["W02"] = {sku: {"on_hand": 40, "allocated": 0, "in_transit": 0}}
 
     with patch.object(state.rng, "random", return_value=0.5):
         result = transfers.run(state, config, _BIZ_DAY)
@@ -143,8 +150,8 @@ def test_eligible_sku_triggers_transfer(state, config):
     Expect 2 InventoryMovementEvent objects.
     """
     sku = "FF-GT50-CS-PN16-FL-MN"
-    state.inventory["W01"] = {sku: 100}
-    state.inventory["W02"] = {sku: 10}
+    state.inventory["W01"] = {sku: {"on_hand": 100, "allocated": 0, "in_transit": 0}}
+    state.inventory["W02"] = {sku: {"on_hand": 10, "allocated": 0, "in_transit": 0}}
 
     with patch.object(state.rng, "random", return_value=0.5):
         result = transfers.run(state, config, _BIZ_DAY)
@@ -181,14 +188,14 @@ def test_eligible_sku_triggers_transfer(state, config):
 def test_inventory_mutated_after_transfer(state, config):
     """After a 15-unit transfer: W01 should be 85, W02 should be 25."""
     sku = "FF-GT50-CS-PN16-FL-MN"
-    state.inventory["W01"] = {sku: 100}
-    state.inventory["W02"] = {sku: 10}
+    state.inventory["W01"] = {sku: {"on_hand": 100, "allocated": 0, "in_transit": 0}}
+    state.inventory["W02"] = {sku: {"on_hand": 10, "allocated": 0, "in_transit": 0}}
 
     with patch.object(state.rng, "random", return_value=0.5):
         transfers.run(state, config, _BIZ_DAY)
 
-    assert state.inventory["W01"][sku] == 85
-    assert state.inventory["W02"][sku] == 25
+    assert _inv(state, "W01", sku) == 85
+    assert _inv(state, "W02", sku) == 25
 
 
 # ---------------------------------------------------------------------------
@@ -202,16 +209,16 @@ def test_transfer_capped_at_w01_availability(state, config):
     W01 -> 2, W02 -> 1.
     """
     sku = "FF-GT50-CS-PN16-FL-MN"
-    state.inventory["W01"] = {sku: 3}
-    state.inventory["W02"] = {sku: 0}
+    state.inventory["W01"] = {sku: {"on_hand": 3, "allocated": 0, "in_transit": 0}}
+    state.inventory["W02"] = {sku: {"on_hand": 0, "allocated": 0, "in_transit": 0}}
 
     with patch.object(state.rng, "random", return_value=0.5):
         result = transfers.run(state, config, _BIZ_DAY)
 
     # Should emit exactly 2 events (one transfer)
     assert len(result) == 2
-    assert state.inventory["W01"][sku] == 2
-    assert state.inventory["W02"][sku] == 1
+    assert _inv(state, "W01", sku) == 2
+    assert _inv(state, "W02", sku) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -222,16 +229,16 @@ def test_transfer_capped_at_w01_availability(state, config):
 def test_probability_gate_suppresses_run(state, config):
     """Seed 0 produces random()=0.844 >= 0.70 -> gate blocks. No events, no mutation."""
     sku = "FF-GT50-CS-PN16-FL-MN"
-    state.inventory["W01"] = {sku: 100}
-    state.inventory["W02"] = {sku: 0}
+    state.inventory["W01"] = {sku: {"on_hand": 100, "allocated": 0, "in_transit": 0}}
+    state.inventory["W02"] = {sku: {"on_hand": 0, "allocated": 0, "in_transit": 0}}
     _force_gate_block(state)
 
     result = transfers.run(state, config, _BIZ_DAY)
 
     assert result == []
     # Inventory unchanged
-    assert state.inventory["W01"][sku] == 100
-    assert state.inventory["W02"][sku] == 0
+    assert _inv(state, "W01", sku) == 100
+    assert _inv(state, "W02", sku) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -246,8 +253,8 @@ def test_max_skus_per_day_cap(state, config):
 
     for i in range(10):
         sku = f"FF-GT{50 + i}-CS-PN16-FL-MN"
-        state.inventory["W01"][sku] = 100
-        state.inventory["W02"][sku] = 0
+        state.inventory["W01"][sku] = {"on_hand": 100, "allocated": 0, "in_transit": 0}
+        state.inventory["W02"][sku] = {"on_hand": 0, "allocated": 0, "in_transit": 0}
 
     with patch.object(state.rng, "random", return_value=0.5):
         result = transfers.run(state, config, _BIZ_DAY)
@@ -268,8 +275,8 @@ def test_max_skus_per_day_cap(state, config):
 def test_movement_counter_increments(state, config):
     """After emitting N events, counters["movement"] should have increased by N."""
     sku = "FF-GT50-CS-PN16-FL-MN"
-    state.inventory["W01"] = {sku: 100}
-    state.inventory["W02"] = {sku: 10}
+    state.inventory["W01"] = {sku: {"on_hand": 100, "allocated": 0, "in_transit": 0}}
+    state.inventory["W02"] = {sku: {"on_hand": 10, "allocated": 0, "in_transit": 0}}
 
     before = state.counters.get("movement", 1000)
 
@@ -290,7 +297,7 @@ def test_w02_only_sku_no_crash(state, config):
     """A SKU present only in W02 (not in W01) must be silently skipped."""
     sku_w2_only = "FF-GT50-CS-PN16-FL-MN"
     state.inventory["W01"] = {}
-    state.inventory["W02"] = {sku_w2_only: 5}
+    state.inventory["W02"] = {sku_w2_only: {"on_hand": 5, "allocated": 0, "in_transit": 0}}
 
     with patch.object(state.rng, "random", return_value=0.5):
         result = transfers.run(state, config, _BIZ_DAY)
@@ -307,7 +314,7 @@ def test_w02_only_sku_no_crash(state, config):
 def test_w01_only_sku_not_transferred(state, config):
     """A SKU only in W01 (absent from W02) must NOT be replenished."""
     sku_w1_only = "FF-GT50-CS-PN16-FL-MN"
-    state.inventory["W01"] = {sku_w1_only: 100}
+    state.inventory["W01"] = {sku_w1_only: {"on_hand": 100, "allocated": 0, "in_transit": 0}}
     state.inventory["W02"] = {}
 
     with patch.object(state.rng, "random", return_value=0.5):
@@ -315,7 +322,7 @@ def test_w01_only_sku_not_transferred(state, config):
 
     assert all(e.sku != sku_w1_only for e in result)
     # W01 stock unchanged
-    assert state.inventory["W01"][sku_w1_only] == 100
+    assert _inv(state, "W01", sku_w1_only) == 100
 
 
 # ---------------------------------------------------------------------------
@@ -331,15 +338,15 @@ def test_determinism_same_seed(config, tmp_path):
     inv_w02 = {}
     for i in range(10):
         sku = f"FF-GT{10 + i}-CS-PN16-FL-MN"
-        inv_w01[sku] = 100
-        inv_w02[sku] = 0
+        inv_w01[sku] = {"on_hand": 100, "allocated": 0, "in_transit": 0}
+        inv_w02[sku] = {"on_hand": 0, "allocated": 0, "in_transit": 0}
 
     def _make_state() -> SimulationState:
         db = tmp_path / f"sim_{id(object())}.db"
         s = SimulationState.from_new(config, db_path=db)
         s.inventory.clear()
-        s.inventory["W01"] = dict(inv_w01)
-        s.inventory["W02"] = dict(inv_w02)
+        s.inventory["W01"] = copy.deepcopy(inv_w01)
+        s.inventory["W02"] = copy.deepcopy(inv_w02)
         return s
 
     state1 = _make_state()

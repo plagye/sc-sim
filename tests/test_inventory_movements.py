@@ -123,11 +123,11 @@ def test_transfer_updates_inventory(config, tmp_path: Path):
 
     sku = st.catalog[0].sku
     # Set known W01 stock; W02 starts at 0 for this SKU
-    st.inventory["W01"][sku] = 100
+    st.inventory["W01"][sku] = {"on_hand": 100, "allocated": 0, "in_transit": 0}
     st.inventory["W02"].pop(sku, None)
 
-    inv_w01_before = st.inventory["W01"][sku]
-    inv_w02_before = st.inventory["W02"].get(sku, 0)
+    inv_w01_before = 100
+    inv_w02_before = 0
 
     # Call the private helper directly so we can guarantee it runs
     events = mod._generate_transfers(st, _BUSINESS_DAY)
@@ -139,10 +139,10 @@ def test_transfer_updates_inventory(config, tmp_path: Path):
         original = mod._TRANSFER_PROB
         mod._TRANSFER_PROB = 1.0
         # Reset inventory since RNG consumed some draws
-        st.inventory["W01"][sku] = 100
+        st.inventory["W01"][sku] = {"on_hand": 100, "allocated": 0, "in_transit": 0}
         st.inventory["W02"].pop(sku, None)
-        inv_w01_before = st.inventory["W01"][sku]
-        inv_w02_before = st.inventory["W02"].get(sku, 0)
+        inv_w01_before = 100
+        inv_w02_before = 0
         events = mod._generate_transfers(st, _BUSINESS_DAY)
         mod._TRANSFER_PROB = original
 
@@ -153,8 +153,10 @@ def test_transfer_updates_inventory(config, tmp_path: Path):
     assert transfer_events, "Expected at least one transfer event"
 
     # Verify that at least one warehouse pair shows the expected inventory change
-    inv_w01_after = st.inventory["W01"].get(sku, 0)
-    inv_w02_after = st.inventory["W02"].get(sku, 0)
+    pos_w01 = st.inventory["W01"].get(sku)
+    pos_w02 = st.inventory["W02"].get(sku)
+    inv_w01_after = pos_w01["on_hand"] if pos_w01 else 0
+    inv_w02_after = pos_w02["on_hand"] if pos_w02 else 0
 
     total_before = inv_w01_before + inv_w02_before
     total_after = inv_w01_after + inv_w02_after
@@ -179,7 +181,7 @@ def test_transfer_no_negative_inventory(config, tmp_path: Path):
 
     # Set small stock to increase pressure on bounds
     for sku_key in list(st.inventory["W01"].keys())[:10]:
-        st.inventory["W01"][sku_key] = 1
+        st.inventory["W01"][sku_key] = {"on_hand": 1, "allocated": 0, "in_transit": 0}
 
     original = mod._TRANSFER_PROB
     mod._TRANSFER_PROB = 1.0
@@ -193,7 +195,8 @@ def test_transfer_no_negative_inventory(config, tmp_path: Path):
 
     # Verify no negative quantities
     for wh_code, wh_inv in st.inventory.items():
-        for sku, qty in wh_inv.items():
+        for sku, pos in wh_inv.items():
+            qty = pos["on_hand"] if isinstance(pos, dict) else pos
             assert qty >= 0, (
                 f"Negative inventory at {wh_code}/{sku}: {qty}"
             )
@@ -253,8 +256,8 @@ def test_scrap_event_reduces_inventory(config, tmp_path: Path):
 
     # Ensure W01 has stocked SKUs
     sku = st.catalog[0].sku
-    st.inventory["W01"][sku] = 200
-    inv_before = st.inventory["W01"][sku]
+    st.inventory["W01"][sku] = {"on_hand": 200, "allocated": 0, "in_transit": 0}
+    inv_before = 200
 
     original = mod._SCRAP_PROB
     mod._SCRAP_PROB = 1.0
@@ -272,16 +275,9 @@ def test_scrap_event_reduces_inventory(config, tmp_path: Path):
         assert evt.warehouse_id == "W01"
         assert evt.reason_code in ("quality_reject", "expired", "damaged_storage")
 
-    # Inventory must have decreased overall in W01
-    inv_after = sum(st.inventory["W01"].values())
-    # We can't assert on a single SKU since scrap picks randomly, but total W01
-    # must be ≤ total before
-    total_before = sum(
-        v for k, v in st.inventory["W01"].items()
-        if k != sku
-    ) + inv_before
     # Just verify the scrapped quantities are positive and inventory didn't go negative
-    for sku_key, qty in st.inventory["W01"].items():
+    for sku_key, pos in st.inventory["W01"].items():
+        qty = pos["on_hand"] if isinstance(pos, dict) else pos
         assert qty >= 0, f"W01/{sku_key} has negative inventory after scrap: {qty}"
 
 
@@ -442,7 +438,7 @@ def test_adjustment_no_negative_after_transfer(config, tmp_path: Path):
 
     # Pick a SKU, set tiny stock so a transfer will likely deplete it
     sku = st.catalog[0].sku
-    st.inventory["W01"][sku] = 1
+    st.inventory["W01"][sku] = {"on_hand": 1, "allocated": 0, "in_transit": 0}
 
     # Force transfer + adjustment both to run
     orig_transfer = mod._TRANSFER_PROB
@@ -458,7 +454,8 @@ def test_adjustment_no_negative_after_transfer(config, tmp_path: Path):
 
     # No warehouse/SKU should ever go negative
     for wh_code, wh_inv in st.inventory.items():
-        for sku_key, qty in wh_inv.items():
+        for sku_key, pos in wh_inv.items():
+            qty = pos["on_hand"] if isinstance(pos, dict) else pos
             assert qty >= 0, f"Negative inventory at {wh_code}/{sku_key}: {qty}"
 
 
@@ -488,5 +485,6 @@ def test_inventory_never_negative(config, tmp_path: Path):
         transfers.run(st, cfg, d)
 
     for wh, inv in st.inventory.items():
-        for sku, qty in inv.items():
+        for sku, pos in inv.items():
+            qty = pos["on_hand"] if isinstance(pos, dict) else pos
             assert qty >= 0, f"Negative inventory: {wh}/{sku} = {qty}"

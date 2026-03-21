@@ -85,14 +85,19 @@ class Customer:
 # Internal per-segment configuration tables
 # ---------------------------------------------------------------------------
 
-# (min_credit, max_credit) by segment
+# (min_credit, max_credit) by segment — calibrated to cover 2-3× the P90
+# single-order value for that segment, so normal operations stay below the
+# limit while genuinely delinquent customers still get held.
+# Observed P90 order values (year run, seed 42):
+#   Oil & Gas 5.9M, Water Utilities 984K, Chemical Plants 4.9M,
+#   Industrial Distributors 402K, HVAC Contractors 1.9M, Shipyards 21M.
 _CREDIT_LIMITS: dict[str, tuple[float, float]] = {
-    "Oil & Gas":               (500_000,   2_000_000),
-    "Water Utilities":         (100_000,     500_000),
-    "Chemical Plants":         (200_000,   1_000_000),
-    "Industrial Distributors": ( 50_000,     200_000),
-    "HVAC Contractors":        ( 20_000,     100_000),
-    "Shipyards":             (1_000_000,   5_000_000),
+    "Oil & Gas":               ( 30_000_000,  150_000_000),
+    "Water Utilities":         (  2_000_000,   10_000_000),
+    "Chemical Plants":         (  5_000_000,   30_000_000),
+    "Industrial Distributors": (  2_000_000,    8_000_000),
+    "HVAC Contractors":        (  4_000_000,   15_000_000),
+    "Shipyards":               ( 30_000_000,  150_000_000),
 }
 
 # Ordering profiles (static part — seasonal_profile built separately)

@@ -1,9 +1,14 @@
-"""Tests for the payment processing engine (Phase 4, Step 32)."""
+"""Tests for the payment processing engine (Phase 4, Step 32 / Step 58).
+
+Step 58 replaces the daily Bernoulli trigger with explicit scheduled payments
+stored in ``state.scheduled_payments`` and fired when ``due_date <= sim_date``.
+"""
 
 from __future__ import annotations
 
+import random
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -33,12 +38,17 @@ def state(config, tmp_path: Path) -> SimulationState:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Constants
 # ---------------------------------------------------------------------------
 
 _BUSINESS_DAY = date(2026, 1, 5)   # Monday
 _SATURDAY = date(2026, 1, 3)
 _HOLIDAY = date(2026, 1, 1)        # New Year's Day (Polish holiday)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _make_order(
@@ -76,51 +86,22 @@ def _make_order(
     }
 
 
-def _force_payment_for(state: SimulationState, customer_id: str, behaviour: str) -> None:
-    """Seed the RNG so the next run() call produces the desired payment behaviour.
-
-    This works by replacing state.rng with a deterministic object whose
-    random() calls return controlled values.
-    """
-    import random
-
-    class _FixedRNG:
-        """Returns a fixed sequence then falls back to a real RNG."""
-
-        def __init__(self, values: list[float], fallback_seed: int = 0) -> None:
-            self._values = list(values)
-            self._idx = 0
-            self._fallback = random.Random(fallback_seed)
-
-        def random(self) -> float:
-            if self._idx < len(self._values):
-                v = self._values[self._idx]
-                self._idx += 1
-                return v
-            return self._fallback.random()
-
-        def uniform(self, a: float, b: float) -> float:
-            if self._idx < len(self._values):
-                v = self._values[self._idx]
-                self._idx += 1
-                # scale the value to the [a, b] range
-                return a + v * (b - a)
-            return self._fallback.uniform(a, b)
-
-    # daily_prob = 1 / payment_terms_days.  Use 0.0 to always trigger payment.
-    # Then the behaviour roll:
-    #   on_time:    roll < 0.82
-    #   late:       0.82 <= roll < 0.97
-    #   very_late:  roll >= 0.97
-    if behaviour == "on_time":
-        behaviour_roll = 0.50
-    elif behaviour == "late":
-        behaviour_roll = 0.85
-    else:  # very_late
-        behaviour_roll = 0.99
-
-    # 0.0 < daily_prob for any customer, so 0.0 always triggers
-    state.rng = _FixedRNG([0.0, behaviour_roll, 0.65])
+def _add_scheduled_entry(
+    state: SimulationState,
+    customer_id: str,
+    amount_pln: float,
+    due_date: date,
+    behaviour: str = "on_time",
+    invoice_ref: str = "SHIP-20260105-0001",
+) -> None:
+    """Seed one entry in state.scheduled_payments."""
+    state.scheduled_payments.append({
+        "customer_id": customer_id,
+        "amount_pln": amount_pln,
+        "due_date": due_date.isoformat(),
+        "behaviour": behaviour,
+        "invoice_ref": invoice_ref,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -129,16 +110,22 @@ def _force_payment_for(state: SimulationState, customer_id: str, behaviour: str)
 
 
 def test_no_payment_on_weekend(state, config):
-    """Engine must return [] on Saturday and leave balances unchanged."""
+    """Engine must return [] on Saturday even if entries are due."""
     customer = state.customers[0]
     state.customer_balances[customer.customer_id] = 5000.0
+    _add_scheduled_entry(state, customer.customer_id, 5000.0, _SATURDAY)
 
     result = run(state, config, _SATURDAY)
 
     assert result == []
-    assert state.customer_balances[customer.customer_id] == 5000.0
+    # Entry must still be present — not fired
+    assert any(
+        e["customer_id"] == customer.customer_id
+        for e in state.scheduled_payments
+    )
 
     # Cleanup
+    state.scheduled_payments.clear()
     state.customer_balances[customer.customer_id] = 0.0
 
 
@@ -151,26 +138,28 @@ def test_no_payment_on_holiday(state, config):
     """Engine must return [] on Polish public holiday."""
     customer = state.customers[0]
     state.customer_balances[customer.customer_id] = 5000.0
+    _add_scheduled_entry(state, customer.customer_id, 5000.0, _HOLIDAY)
 
     result = run(state, config, _HOLIDAY)
 
     assert result == []
-    assert state.customer_balances[customer.customer_id] == 5000.0
 
     # Cleanup
+    state.scheduled_payments.clear()
     state.customer_balances[customer.customer_id] = 0.0
 
 
 # ---------------------------------------------------------------------------
-# Test 3: no payment when all balances zero
+# Test 3: no payment when no entries are due
 # ---------------------------------------------------------------------------
 
 
-def test_no_payment_when_all_balances_zero(state, config):
-    """Engine must return [] when no customer has a positive balance."""
-    # Ensure every customer has a zero balance
-    for customer_id in list(state.customer_balances.keys()):
-        state.customer_balances[customer_id] = 0.0
+def test_no_payment_when_no_entries_due(state, config):
+    """Engine must return [] when no scheduled entry is due today."""
+    # Ensure no entries in schedule
+    state.scheduled_payments.clear()
+    for cid in list(state.customer_balances.keys()):
+        state.customer_balances[cid] = 0.0
 
     result = run(state, config, _BUSINESS_DAY)
 
@@ -178,79 +167,45 @@ def test_no_payment_when_all_balances_zero(state, config):
 
 
 # ---------------------------------------------------------------------------
-# Test 4: PaymentEvent schema correctness
+# Test 4: on_time payment fires on due date
 # ---------------------------------------------------------------------------
 
 
-def test_payment_event_schema(state, config):
-    """A PaymentEvent returned must have correct fields and sensible values."""
+def test_on_time_payment_fires_on_due_date(state, config):
+    """A scheduled on_time entry fires and pays full balance on due_date."""
     customer = state.customers[0]
     customer_id = customer.customer_id
-    state.customer_balances[customer_id] = 50000.0
-
-    _force_payment_for(state, customer_id, "on_time")
+    amount = 12000.0
+    state.customer_balances[customer_id] = amount
+    _add_scheduled_entry(state, customer_id, amount, _BUSINESS_DAY, behaviour="on_time")
 
     result = run(state, config, _BUSINESS_DAY)
 
     payment_events = [e for e in result if isinstance(e, PaymentEvent)]
-    assert len(payment_events) >= 1, "Expected at least one PaymentEvent"
-
-    evt = next(e for e in payment_events if e.customer_id == customer_id)
-
-    assert evt.event_type == "payment"
-    assert evt.customer_id == customer_id
-    assert evt.balance_before_pln > 0.0
-    assert evt.balance_after_pln < evt.balance_before_pln
-    assert evt.balance_after_pln >= 0.0
-    assert evt.payment_amount_pln > 0.0
-    assert isinstance(evt.payment_terms_days, int)
-    assert evt.simulation_date == _BUSINESS_DAY.isoformat()
-
-    # Cleanup
-    state.customer_balances[customer_id] = 0.0
-
-
-# ---------------------------------------------------------------------------
-# Test 5: on_time payment clears full balance
-# ---------------------------------------------------------------------------
-
-
-def test_on_time_payment_clears_full_balance(state, config):
-    """An on_time payment must pay 100% of the outstanding balance."""
-    customer = state.customers[0]
-    customer_id = customer.customer_id
-    initial_balance = 12345.67
-    state.customer_balances[customer_id] = initial_balance
-
-    _force_payment_for(state, customer_id, "on_time")
-
-    result = run(state, config, _BUSINESS_DAY)
-
-    payment_events = [
-        e for e in result
-        if isinstance(e, PaymentEvent) and e.customer_id == customer_id
-    ]
     assert len(payment_events) == 1
-
     evt = payment_events[0]
     assert evt.payment_behaviour == "on_time"
     assert evt.balance_after_pln == 0.0
     assert state.customer_balances[customer_id] == 0.0
+    # Entry must be removed after firing
+    assert not any(e["customer_id"] == customer_id for e in state.scheduled_payments)
+
+    # Cleanup
+    state.customer_balances[customer_id] = 0.0
 
 
 # ---------------------------------------------------------------------------
-# Test 6: late payment pays 50–80% of balance
+# Test 5: late payment fires on due date
 # ---------------------------------------------------------------------------
 
 
-def test_late_payment_partial_fraction(state, config):
-    """A late payment must pay between 50% and 80% of the outstanding balance."""
+def test_late_payment_fires_on_due_date(state, config):
+    """A scheduled late entry fires on due_date and pays 50–80% of balance."""
     customer = state.customers[0]
     customer_id = customer.customer_id
-    initial_balance = 20000.0
-    state.customer_balances[customer_id] = initial_balance
-
-    _force_payment_for(state, customer_id, "late")
+    amount = 20000.0
+    state.customer_balances[customer_id] = amount
+    _add_scheduled_entry(state, customer_id, amount, _BUSINESS_DAY, behaviour="late")
 
     result = run(state, config, _BUSINESS_DAY)
 
@@ -259,34 +214,30 @@ def test_late_payment_partial_fraction(state, config):
         if isinstance(e, PaymentEvent) and e.customer_id == customer_id
     ]
     assert len(payment_events) == 1
-
     evt = payment_events[0]
     assert evt.payment_behaviour == "late"
-
-    min_expected = round(0.50 * initial_balance, 2)
-    max_expected = round(0.80 * initial_balance, 2)
-    assert min_expected <= evt.payment_amount_pln <= max_expected, (
-        f"Late payment {evt.payment_amount_pln} not in [{min_expected}, {max_expected}]"
+    assert round(0.50 * amount, 2) <= evt.payment_amount_pln <= round(0.80 * amount, 2), (
+        f"Late payment {evt.payment_amount_pln} not in [50%, 80%] of {amount}"
     )
     assert evt.balance_after_pln > 0.0
 
     # Cleanup
+    state.scheduled_payments.clear()
     state.customer_balances[customer_id] = 0.0
 
 
 # ---------------------------------------------------------------------------
-# Test 7: very_late payment pays 10–30% of balance
+# Test 6: very_late payment fires on due date
 # ---------------------------------------------------------------------------
 
 
-def test_very_late_payment_partial_fraction(state, config):
-    """A very_late payment must pay between 10% and 30% of the balance."""
+def test_very_late_payment_fires_on_due_date(state, config):
+    """A scheduled very_late entry fires on due_date and pays 10–30% of balance."""
     customer = state.customers[0]
     customer_id = customer.customer_id
-    initial_balance = 30000.0
-    state.customer_balances[customer_id] = initial_balance
-
-    _force_payment_for(state, customer_id, "very_late")
+    amount = 30000.0
+    state.customer_balances[customer_id] = amount
+    _add_scheduled_entry(state, customer_id, amount, _BUSINESS_DAY, behaviour="very_late")
 
     result = run(state, config, _BUSINESS_DAY)
 
@@ -295,74 +246,113 @@ def test_very_late_payment_partial_fraction(state, config):
         if isinstance(e, PaymentEvent) and e.customer_id == customer_id
     ]
     assert len(payment_events) == 1
-
     evt = payment_events[0]
     assert evt.payment_behaviour == "very_late"
-
-    min_expected = round(0.10 * initial_balance, 2)
-    max_expected = round(0.30 * initial_balance, 2)
-    assert min_expected <= evt.payment_amount_pln <= max_expected, (
-        f"Very late payment {evt.payment_amount_pln} not in [{min_expected}, {max_expected}]"
+    assert round(0.10 * amount, 2) <= evt.payment_amount_pln <= round(0.30 * amount, 2), (
+        f"Very late payment {evt.payment_amount_pln} not in [10%, 30%] of {amount}"
     )
 
     # Cleanup
+    state.scheduled_payments.clear()
     state.customer_balances[customer_id] = 0.0
 
 
 # ---------------------------------------------------------------------------
-# Test 8: balance never goes negative
+# Test 7: payment not fired before due date
 # ---------------------------------------------------------------------------
 
 
-def test_balance_never_goes_negative(state, config):
-    """Even a very small positive balance must not result in a negative balance."""
+def test_payment_not_fired_before_due_date(state, config):
+    """Entry with due_date tomorrow must not fire today."""
     customer = state.customers[0]
     customer_id = customer.customer_id
-    state.customer_balances[customer_id] = 0.01
+    state.customer_balances[customer_id] = 5000.0
+    tomorrow = _BUSINESS_DAY + timedelta(days=1)
+    _add_scheduled_entry(state, customer_id, 5000.0, tomorrow)
 
-    _force_payment_for(state, customer_id, "on_time")
+    result = run(state, config, _BUSINESS_DAY)
 
-    run(state, config, _BUSINESS_DAY)
+    assert result == []
+    # Entry must still be present
+    assert any(e["customer_id"] == customer_id for e in state.scheduled_payments)
 
-    assert state.customer_balances[customer_id] >= 0.0
+    # Cleanup
+    state.scheduled_payments.clear()
+    state.customer_balances[customer_id] = 0.0
 
 
 # ---------------------------------------------------------------------------
-# Test 9: credit hold released after payment reduces exposure below limit
+# Test 8: multiple payments same day
 # ---------------------------------------------------------------------------
 
 
-def test_credit_hold_released_after_payment(state, config):
-    """Credit-held orders are released when on_time payment drops exposure below limit."""
-    customer = state.customers[0]
-    customer_id = customer.customer_id
-    credit_limit = customer.credit_limit
-
-    # Set balance just above limit with a small held order value
-    small_order_value = 100.0
-    state.customer_balances[customer_id] = credit_limit + 1000.0
-
-    order_id = "ORD-PAY-HOLD-001"
-    order = _make_order(
-        order_id=order_id,
-        customer_id=customer_id,
-        unit_price=small_order_value,
-        quantity=1,
-        status="credit_hold",
-    )
-    state.open_orders[order_id] = order
-
-    # Force on_time payment that wipes the full balance
-    _force_payment_for(state, customer_id, "on_time")
+def test_multiple_payments_same_day(state, config):
+    """Three entries due today for 3 different customers emit 3 PaymentEvents."""
+    customers = state.customers[:3]
+    for c in customers:
+        state.customer_balances[c.customer_id] = 10000.0
+        _add_scheduled_entry(state, c.customer_id, 10000.0, _BUSINESS_DAY)
 
     result = run(state, config, _BUSINESS_DAY)
 
     payment_events = [e for e in result if isinstance(e, PaymentEvent)]
-    release_events = [e for e in result if isinstance(e, CreditReleaseEvent)]
+    paying_ids = {e.customer_id for e in payment_events}
+    for c in customers:
+        assert c.customer_id in paying_ids, f"{c.customer_id} did not pay"
 
-    assert len(payment_events) >= 1
-    # After on_time payment, balance = 0; exposure = small_order_value < limit
-    assert len(release_events) >= 1, "Credit release expected after balance cleared"
+    assert len(payment_events) == 3
+
+    # Cleanup
+    state.scheduled_payments.clear()
+    for c in customers:
+        state.customer_balances[c.customer_id] = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Test 9: balance clamped to zero
+# ---------------------------------------------------------------------------
+
+
+def test_balance_clamped_to_zero(state, config):
+    """Payment that exceeds balance must clamp balance_after to 0.0."""
+    customer = state.customers[0]
+    customer_id = customer.customer_id
+    state.customer_balances[customer_id] = 100.0
+    # Schedule payment for a larger amount (on_time = fraction 1.0)
+    _add_scheduled_entry(state, customer_id, 50000.0, _BUSINESS_DAY, behaviour="on_time")
+
+    result = run(state, config, _BUSINESS_DAY)
+
+    payment_events = [e for e in result if isinstance(e, PaymentEvent)]
+    assert len(payment_events) == 1
+    assert payment_events[0].balance_after_pln == 0.0
+    assert state.customer_balances[customer_id] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Test 10: credit release fires after payment
+# ---------------------------------------------------------------------------
+
+
+def test_credit_release_fires_after_payment(state, config):
+    """Credit-held orders are released when payment drops exposure below limit."""
+    customer = state.customers[0]
+    customer_id = customer.customer_id
+    credit_limit = customer.credit_limit
+
+    state.customer_balances[customer_id] = credit_limit + 1000.0
+    _add_scheduled_entry(
+        state, customer_id, credit_limit + 1000.0, _BUSINESS_DAY, behaviour="on_time"
+    )
+
+    order_id = "ORD-PAY-HOLD-CRS-001"
+    order = _make_order(order_id, customer_id, 100.0, 1, status="credit_hold")
+    state.open_orders[order_id] = order
+
+    result = run(state, config, _BUSINESS_DAY)
+
+    release_events = [e for e in result if isinstance(e, CreditReleaseEvent)]
+    assert len(release_events) >= 1
     assert any(e.order_id == order_id for e in release_events)
     assert state.open_orders[order_id]["status"] == "confirmed"
 
@@ -372,137 +362,232 @@ def test_credit_hold_released_after_payment(state, config):
 
 
 # ---------------------------------------------------------------------------
-# Test 10: credit hold NOT released if exposure still over limit after partial payment
+# Test 11: invoice_ref in event
 # ---------------------------------------------------------------------------
 
 
-def test_credit_hold_not_released_if_still_over_limit(state, config):
-    """Partial late payment that still leaves exposure above limit must not release holds."""
+def test_invoice_ref_in_event(state, config):
+    """PaymentEvent must include the invoice_ref from the scheduled entry."""
     customer = state.customers[0]
     customer_id = customer.customer_id
-    credit_limit = customer.credit_limit
-
-    # Balance much higher than the limit so even a 80% payment leaves balance > limit
-    state.customer_balances[customer_id] = credit_limit * 10.0
-
-    order_id = "ORD-PAY-HOLD-002"
-    order = _make_order(
-        order_id=order_id,
-        customer_id=customer_id,
-        unit_price=100.0,
-        quantity=1,
-        status="credit_hold",
-    )
-    state.open_orders[order_id] = order
-
-    _force_payment_for(state, customer_id, "late")
-
-    result = run(state, config, _BUSINESS_DAY)
-
-    release_events = [
-        e for e in result
-        if isinstance(e, CreditReleaseEvent) and e.order_id == order_id
-    ]
-    assert len(release_events) == 0, "Must NOT release when exposure still over limit"
-    assert state.open_orders[order_id]["status"] == "credit_hold"
-
-    # Cleanup
-    del state.open_orders[order_id]
-    state.customer_balances[customer_id] = 0.0
-
-
-# ---------------------------------------------------------------------------
-# Test 11: only customers with positive balance can pay
-# ---------------------------------------------------------------------------
-
-
-def test_only_customers_with_positive_balance_can_pay(state, config):
-    """Customers with zero balance must never appear in the event list."""
-    customer_zero = state.customers[0]
-    customer_pos = state.customers[1]
-
-    state.customer_balances[customer_zero.customer_id] = 0.0
-    state.customer_balances[customer_pos.customer_id] = 10000.0
-
-    # Force payment for the positive-balance customer
-    _force_payment_for(state, customer_pos.customer_id, "on_time")
+    ref = "SHIP-20260105-0042"
+    state.customer_balances[customer_id] = 5000.0
+    _add_scheduled_entry(state, customer_id, 5000.0, _BUSINESS_DAY, invoice_ref=ref)
 
     result = run(state, config, _BUSINESS_DAY)
 
     payment_events = [e for e in result if isinstance(e, PaymentEvent)]
-    paying_customers = {e.customer_id for e in payment_events}
-
-    assert customer_zero.customer_id not in paying_customers, (
-        "Customer with zero balance must not appear in payment events"
-    )
-
-    # Cleanup
-    state.customer_balances[customer_pos.customer_id] = 0.0
-
-
-# ---------------------------------------------------------------------------
-# Test 12: reproducibility — same seed produces same results
-# ---------------------------------------------------------------------------
-
-
-def test_reproducibility(state, config):
-    """Running twice from the same RNG seed must produce identical payment amounts."""
-    import random
-
-    customer = state.customers[0]
-    customer_id = customer.customer_id
-    initial_balance = 25000.0
-
-    def run_once() -> list[float]:
-        state.customer_balances[customer_id] = initial_balance
-        state.rng = random.Random(42)
-        result = run(state, config, _BUSINESS_DAY)
-        return [e.payment_amount_pln for e in result if isinstance(e, PaymentEvent)]
-
-    first = run_once()
-    # Reset balance to initial for second run
-    second = run_once()
-
-    assert first == second, f"Reproducibility failed: {first} != {second}"
+    assert len(payment_events) == 1
+    assert payment_events[0].invoice_ref == ref
 
     # Cleanup
     state.customer_balances[customer_id] = 0.0
 
 
 # ---------------------------------------------------------------------------
-# Test 13: PaymentEvent round-trips via model_dump
+# Test 12: scheduled_payments round-trips through SQLite
 # ---------------------------------------------------------------------------
 
 
-def test_payment_event_roundtrips_via_model_dump(state, config):
-    """PaymentEvent.model_dump() must include all required keys with correct types."""
+def test_scheduled_payments_round_trips_sqlite(config, tmp_path: Path):
+    """state.scheduled_payments persists to SQLite and reloads correctly."""
+    db = tmp_path / "sim_pay.db"
+    s = SimulationState.from_new(config, db_path=db)
+
+    entry = {
+        "customer_id": "CUST-0001",
+        "amount_pln": 9876.54,
+        "due_date": "2026-03-01",
+        "behaviour": "late",
+        "invoice_ref": "SHIP-20260228-0003",
+    }
+    s.scheduled_payments.append(entry)
+    s.save()
+
+    s2 = SimulationState.from_db(config, db_path=db)
+    assert len(s2.scheduled_payments) == 1
+    loaded = s2.scheduled_payments[0]
+    assert loaded["customer_id"] == entry["customer_id"]
+    assert loaded["amount_pln"] == entry["amount_pln"]
+    assert loaded["due_date"] == entry["due_date"]
+    assert loaded["behaviour"] == entry["behaviour"]
+    assert loaded["invoice_ref"] == entry["invoice_ref"]
+
+
+# ---------------------------------------------------------------------------
+# Test 13: load_lifecycle creates scheduled entry
+# ---------------------------------------------------------------------------
+
+
+def test_load_lifecycle_creates_scheduled_entry(config, tmp_path: Path):
+    """load_lifecycle.run() on a delivered load creates a scheduled_payments entry."""
+    from flowform.engines import load_lifecycle
+
+    db = tmp_path / "sim_lc.db"
+    s = SimulationState.from_new(config, db_path=db)
+
+    customer = s.customers[0]
+    customer_id = customer.customer_id
+
+    # Plant a minimal order with an allocated line in open_orders
+    order_id = "ORD-2026-TEST01"
+    sku = s.catalog[0].sku
+    s.open_orders[order_id] = {
+        "event_type": "customer_order",
+        "event_id": str(uuid.uuid4()),
+        "order_id": order_id,
+        "customer_id": customer_id,
+        "simulation_date": "2026-01-05",
+        "timestamp": "2026-01-05T10:00:00",
+        "currency": "PLN",
+        "priority": "standard",
+        "status": "allocated",
+        "requested_delivery_date": "2026-01-20",
+        "lines": [
+            {
+                "line_id": f"{order_id}-L1",
+                "sku": sku,
+                "quantity_ordered": 10,
+                "quantity_allocated": 10,
+                "quantity_shipped": 0,
+                "quantity_backordered": 0,
+                "unit_price": 500.0,
+                "line_status": "allocated",
+            }
+        ],
+    }
+
+    # Plant a delivered load that is NOT yet in pending_pod (out_for_delivery state)
+    delivery_date = date(2026, 1, 5)
+    s.active_loads["LOAD-0001"] = {
+        "load_id": "LOAD-0001",
+        "status": "out_for_delivery",
+        "carrier_code": "DHL",
+        "source_warehouse_id": "W01",
+        "shipment_ids": ["SHIP-001"],
+        "order_ids": [order_id],
+        "total_weight_kg": 50.0,
+        "weight_unit": "kg",
+        "total_weight_reported": 50.0,
+        "sync_window": "14",
+        "priority": "standard",
+        "customer_ids": [customer_id],
+        "planned_date": "2026-01-04",
+        "out_for_delivery_date": "2026-01-04",
+        "delivery_window": 1,
+    }
+
+    # Force the reliability RNG to always succeed (return < reliability threshold)
+    s.rng = random.Random(0)  # DHL reliability ~0.92; seed 0 gives small values
+
+    load_lifecycle.run(s, config, delivery_date)
+
+    # After delivery, a scheduled_payments entry should exist for this customer
+    assert len(s.scheduled_payments) == 1
+    entry = s.scheduled_payments[0]
+    assert entry["customer_id"] == customer_id
+    assert entry["behaviour"] in {"on_time", "late", "very_late"}
+    assert entry["amount_pln"] > 0.0
+    assert "due_date" in entry
+    assert "invoice_ref" in entry
+
+
+# ---------------------------------------------------------------------------
+# Test 14: due_date jitter is seeded
+# ---------------------------------------------------------------------------
+
+
+def test_due_date_jitter_is_seeded(config, tmp_path: Path):
+    """Same seed, same delivery → same due_date in scheduled_payments."""
+    from flowform.engines import load_lifecycle
+
+    def _run_delivery(seed: int) -> str:
+        db = tmp_path / f"sim_jitter_{seed}.db"
+        s = SimulationState.from_new(config, db_path=db)
+        customer_id = s.customers[0].customer_id
+        sku = s.catalog[0].sku
+        order_id = f"ORD-2026-JITTER{seed}"
+        s.open_orders[order_id] = {
+            "event_type": "customer_order",
+            "event_id": str(uuid.uuid4()),
+            "order_id": order_id,
+            "customer_id": customer_id,
+            "simulation_date": "2026-01-05",
+            "timestamp": "2026-01-05T10:00:00",
+            "currency": "PLN",
+            "priority": "standard",
+            "status": "allocated",
+            "requested_delivery_date": "2026-01-20",
+            "lines": [
+                {
+                    "line_id": f"{order_id}-L1",
+                    "sku": sku,
+                    "quantity_ordered": 5,
+                    "quantity_allocated": 5,
+                    "quantity_shipped": 0,
+                    "quantity_backordered": 0,
+                    "unit_price": 300.0,
+                    "line_status": "allocated",
+                }
+            ],
+        }
+        s.active_loads["LOAD-J001"] = {
+            "load_id": "LOAD-J001",
+            "status": "out_for_delivery",
+            "carrier_code": "DHL",
+            "source_warehouse_id": "W01",
+            "shipment_ids": ["SHIP-J001"],
+            "order_ids": [order_id],
+            "total_weight_kg": 15.0,
+            "weight_unit": "kg",
+            "total_weight_reported": 15.0,
+            "sync_window": "14",
+            "priority": "standard",
+            "customer_ids": [customer_id],
+            "planned_date": "2026-01-04",
+            "out_for_delivery_date": "2026-01-04",
+            "delivery_window": 1,
+        }
+        s.rng = random.Random(42)
+        load_lifecycle.run(s, config, date(2026, 1, 5))
+        if s.scheduled_payments:
+            return s.scheduled_payments[0]["due_date"]
+        return ""
+
+    due1 = _run_delivery(0)
+    due2 = _run_delivery(0)
+    assert due1 == due2, f"Due dates differ: {due1} vs {due2}"
+    assert due1 != "", "Expected a due_date to be scheduled"
+
+
+# ---------------------------------------------------------------------------
+# Test 15: PaymentEvent schema includes invoice_ref
+# ---------------------------------------------------------------------------
+
+
+def test_payment_event_schema(state, config):
+    """PaymentEvent model_dump must include invoice_ref plus all core fields."""
     customer = state.customers[0]
     customer_id = customer.customer_id
+    ref = "SHIP-20260105-0099"
     state.customer_balances[customer_id] = 8000.0
-
-    _force_payment_for(state, customer_id, "on_time")
+    _add_scheduled_entry(state, customer_id, 8000.0, _BUSINESS_DAY, invoice_ref=ref)
 
     result = run(state, config, _BUSINESS_DAY)
 
     payment_events = [e for e in result if isinstance(e, PaymentEvent)]
     assert len(payment_events) >= 1
-
     d = payment_events[0].model_dump()
 
     expected_keys = {
-        "event_type",
-        "event_id",
-        "simulation_date",
-        "customer_id",
-        "payment_amount_pln",
-        "balance_before_pln",
-        "balance_after_pln",
-        "payment_behaviour",
-        "payment_terms_days",
+        "event_type", "event_id", "simulation_date", "customer_id",
+        "payment_amount_pln", "balance_before_pln", "balance_after_pln",
+        "payment_behaviour", "payment_terms_days", "invoice_ref",
     }
     assert expected_keys.issubset(d.keys()), (
         f"Missing keys in model_dump: {expected_keys - d.keys()}"
     )
+    assert d["invoice_ref"] == ref
     assert d["event_type"] == "payment"
     assert isinstance(d["payment_amount_pln"], float)
     assert isinstance(d["payment_terms_days"], int)

@@ -86,7 +86,8 @@ def run(
     for entry in sampled_entries:
         sku = entry.sku
         for wh in _WAREHOUSES:
-            base = state.inventory.get((sku, wh), {}).get("on_hand", 50)
+            pos = state.inventory.get(wh, {}).get(sku)
+            base = max(1, pos.get("on_hand", 50) if pos else 50)
 
             safety_stock = max(1, round(rng.uniform(0.10, 0.25) * base))
             reorder_point = max(1, round(rng.uniform(1.4, 1.8) * safety_stock))
@@ -107,5 +108,10 @@ def run(
                     review_trigger="demand_plan_update",
                 )
             )
+
+            # Populate production engine's stock-pressure lookup (W01 only).
+            # Production reads this to prefer SKUs below target stock.
+            if wh == "W01":
+                state.inventory_target_stock[sku] = target_stock
 
     return events

@@ -320,6 +320,57 @@ def _cmd_until(config: object, target: date) -> None:  # type: ignore[type-arg]
     )
 
 
+def _cmd_continuous(config: object, max_days: int | None, sleep_secs: float) -> None:  # type: ignore[type-arg]
+    """--continuous: run indefinitely one calendar day at a time, resuming from state.
+
+    Args:
+        config:     Validated simulation config.
+        max_days:   If not None, stop after this many calendar days.
+        sleep_secs: Seconds to sleep between simulated days.
+    """
+    import signal
+    import time
+    from flowform.state import SimulationState
+
+    try:
+        state = SimulationState.from_db(config)  # type: ignore[arg-type]
+    except FileNotFoundError:
+        print("No simulation state found. Run with --reset to initialise.")
+        sys.exit(1)
+
+    shutdown_requested = False
+
+    def _handle_signal(sig: int, frame: object) -> None:
+        nonlocal shutdown_requested
+        shutdown_requested = True
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+    days_run = 0
+    while not shutdown_requested:
+        next_date = state.current_date + timedelta(days=1)
+        state.advance_day(next_date)
+        _run_day_loop(state, config, next_date)
+        state.save()
+        days_run += 1
+
+        n_orders = len(state.open_orders)
+        n_loads = len(state.active_loads)
+        print(
+            f"[sim_day={state.sim_day:<4d}  date={state.current_date}  "
+            f"orders={n_orders:<5d}  loads={n_loads}]"
+        )
+
+        if max_days is not None and days_run >= max_days:
+            break
+
+        if not shutdown_requested:
+            time.sleep(sleep_secs)
+
+    print(f"Shutting down cleanly after {days_run} days.")
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -354,6 +405,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print current simulation status without simulating.",
     )
 
+    parser.add_argument(
+        "--continuous",
+        action="store_true",
+        help=(
+            "Run indefinitely one calendar day at a time (resume from existing state). "
+            "Stop with Ctrl-C or SIGTERM."
+        ),
+    )
+    parser.add_argument(
+        "--sleep",
+        type=float,
+        default=1.0,
+        metavar="N",
+        help="Seconds to sleep between simulated days in --continuous mode (default: 1.0).",
+    )
+
     return parser
 
 
@@ -367,8 +434,13 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     # No flags → print help and exit non-zero
-    if not (args.reset or args.days is not None or args.until or args.status):
+    if not (args.reset or args.days is not None or args.until or args.status or args.continuous):
         parser.print_help()
+        sys.exit(1)
+
+    # --continuous cannot be combined with --reset, --until, or --status
+    if args.continuous and (args.reset or args.until or args.status):
+        print("Error: --continuous cannot be combined with --reset, --until, or --status.")
         sys.exit(1)
 
     if args.status:
@@ -387,6 +459,10 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.reset:
         _cmd_reset(config)
+        return
+
+    if args.continuous:
+        _cmd_continuous(config, args.days, args.sleep)
         return
 
     if args.days is not None:

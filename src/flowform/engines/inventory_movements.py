@@ -216,26 +216,38 @@ def _generate_transfers(
         else:
             src, dst = "W02", "W01"
 
-        # Find SKUs with positive stock in source
+        # Find SKUs with positive available (unallocated) stock in source
         src_inv = state.inventory.get(src, {})
-        stocked_skus = [sku for sku, qty in src_inv.items() if qty > 0]
+        stocked_skus = [
+            sku for sku, pos in src_inv.items()
+            if pos.get("on_hand", 0) - pos.get("allocated", 0) > 0
+        ]
         if not stocked_skus:
             continue
 
         sku = state.rng.choice(stocked_skus)
-        on_hand = src_inv[sku]
-        max_transfer = max(1, int(on_hand * _TRANSFER_MAX_FRACTION))
+        src_pos = src_inv[sku]
+        on_hand = src_pos.get("on_hand", 0)
+        allocated = src_pos.get("allocated", 0)
+        # Only transfer available (unallocated) units to preserve invariant
+        available = max(0, on_hand - allocated)
+        if available <= 0:
+            continue
+        max_transfer = max(1, int(available * _TRANSFER_MAX_FRACTION))
         qty = state.rng.randint(1, max(1, max_transfer))
 
         # Guard: never transfer more than available
-        qty = min(qty, on_hand)
+        qty = min(qty, available)
         if qty <= 0:
             continue
 
-        # Mutate inventory
-        state.inventory[src][sku] = on_hand - qty
+        # Mutate inventory: decrement source on_hand, increment dest on_hand
+        src_pos["on_hand"] = on_hand - qty
         dst_inv = state.inventory.setdefault(dst, {})
-        dst_inv[sku] = dst_inv.get(sku, 0) + qty
+        if sku in dst_inv:
+            dst_inv[sku]["on_hand"] += qty
+        else:
+            dst_inv[sku] = {"on_hand": qty, "allocated": 0, "in_transit": 0}
 
         # Emit outbound leg (source)
         events.append(
@@ -293,12 +305,12 @@ def _generate_adjustments(
     n_skus = state.rng.randint(_ADJUSTMENT_SKU_MIN, _ADJUSTMENT_SKU_MAX)
     events: list[InventoryMovementEvent] = []
 
-    # Gather all (warehouse, sku) pairs with stock
+    # Gather all (warehouse, sku) pairs with positive on_hand stock
     candidates: list[tuple[str, str, int]] = []
     for wh_code, wh_inv in state.inventory.items():
-        for sku, qty in wh_inv.items():
-            if qty > 0:
-                candidates.append((wh_code, sku, qty))
+        for sku, pos in wh_inv.items():
+            if pos.get("on_hand", 0) > 0:
+                candidates.append((wh_code, sku, pos.get("on_hand", 0)))
 
     if not candidates:
         return []
@@ -308,7 +320,10 @@ def _generate_adjustments(
     for wh_code, sku, _stale_on_hand in chosen:
         # Re-read live on-hand to avoid using a snapshot that may be stale
         # if _generate_transfers() already mutated inventory for this SKU.
-        current_on_hand = state.inventory[wh_code].get(sku, 0)
+        pos = state.inventory[wh_code].get(sku)
+        if pos is None:
+            continue
+        current_on_hand = pos.get("on_hand", 0)
         if current_on_hand == 0:
             continue  # stock depleted by an earlier transfer this same day
         max_delta = max(1, int(current_on_hand * _ADJUSTMENT_MAX_FRACTION))
@@ -316,11 +331,14 @@ def _generate_adjustments(
         # Randomly increase or decrease; never go negative
         if state.rng.random() < 0.5:
             direction: Literal["in", "out"] = "in"
-            state.inventory[wh_code][sku] = current_on_hand + delta
+            pos["on_hand"] = current_on_hand + delta
         else:
             direction = "out"
-            actual_delta = min(delta, current_on_hand)
-            state.inventory[wh_code][sku] = current_on_hand - actual_delta
+            # Only reduce available (unallocated) units
+            current_allocated = pos.get("allocated", 0)
+            current_available = max(0, current_on_hand - current_allocated)
+            actual_delta = min(delta, current_available)
+            pos["on_hand"] = current_on_hand - actual_delta
             delta = actual_delta
 
         reason = state.rng.choice(_ADJUST_REASONS)
@@ -364,20 +382,28 @@ def _generate_scrap(
     events: list[InventoryMovementEvent] = []
 
     w01_inv = state.inventory.get("W01", {})
-    stocked = [(sku, qty) for sku, qty in w01_inv.items() if qty > 0]
+    # Only scrap available (unallocated) units
+    stocked = [
+        (sku, pos.get("on_hand", 0), pos.get("allocated", 0))
+        for sku, pos in w01_inv.items()
+        if pos.get("on_hand", 0) - pos.get("allocated", 0) > 0
+    ]
     if not stocked:
         return []
 
     chosen = state.rng.sample(stocked, min(n_skus, len(stocked)))
 
-    for sku, on_hand in chosen:
-        max_scrap = max(1, int(on_hand * _SCRAP_MAX_FRACTION))
+    for sku, on_hand, allocated in chosen:
+        available = max(0, on_hand - allocated)
+        if available <= 0:
+            continue
+        max_scrap = max(1, int(available * _SCRAP_MAX_FRACTION))
         qty = state.rng.randint(1, max(1, max_scrap))
-        qty = min(qty, on_hand)
+        qty = min(qty, available)
         if qty <= 0:
             continue
 
-        state.inventory["W01"][sku] = on_hand - qty
+        state.inventory["W01"][sku]["on_hand"] = on_hand - qty
         reason = state.rng.choice(_SCRAP_REASONS)
         events.append(
             _make_event(

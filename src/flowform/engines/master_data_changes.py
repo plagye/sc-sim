@@ -12,7 +12,7 @@ from typing import Any, Literal
 from faker import Faker
 from pydantic import BaseModel
 
-from flowform.calendar import is_business_day
+from flowform.calendar import is_business_day, is_first_business_day_of_quarter
 from flowform.config import Config
 from flowform.master_data.customers import SEGMENTS
 from flowform.state import SimulationState
@@ -218,6 +218,61 @@ def _try_sku_discontinuation(
     )
 
 
+def _run_credit_limit_review(
+    state: SimulationState, config: Config, sim_date: date
+) -> list[MasterDataChangeEvent]:
+    """Quarterly credit limit growth review.
+
+    Runs on the first business day of each quarter, starting from sim_day 90.
+    Customers with low balance utilisation (<50%) and no open credit_hold orders
+    receive a credit limit increase bounded by max_multiplier × initial limit.
+    """
+    if state.sim_day < 90:
+        return []
+
+    events: list[MasterDataChangeEvent] = []
+
+    # Build set of customer_ids with any credit_hold order
+    held_customers: set[str] = set()
+    for order in state.open_orders.values():
+        if order.get("status") == "credit_hold":
+            held_customers.add(order["customer_id"])
+
+    for customer in state.customers:
+        balance = state.customer_balances.get(customer.customer_id, 0.0)
+        credit_limit = customer.credit_limit
+        utilisation = balance / credit_limit if credit_limit > 0 else 0.0
+
+        if utilisation >= 0.5:
+            continue
+        if customer.customer_id in held_customers:
+            continue
+
+        factor = state.rng.uniform(config.credit_limit.growth_min, config.credit_limit.growth_max)
+        old_limit = credit_limit
+        raw_new = round(old_limit * (1 + factor), 2)
+        initial = state.initial_credit_limits.get(customer.customer_id, old_limit)
+        cap = round(initial * config.credit_limit.max_multiplier, 2)
+        new_limit = min(raw_new, cap)
+
+        if new_limit <= old_limit:
+            continue
+
+        customer.credit_limit = new_limit
+
+        events.append(_make_event(
+            state, sim_date,
+            entity_type="customer",
+            entity_id=customer.customer_id,
+            field_changed="credit_limit",
+            old_value=old_limit,
+            new_value=new_limit,
+            reason="quarterly_credit_review",
+        ))
+
+    return events
+
+
 def run(state: SimulationState, config: Config, sim_date: date) -> list[MasterDataChangeEvent]:
     """Run the master data change engine for *sim_date*.
 
@@ -228,6 +283,10 @@ def run(state: SimulationState, config: Config, sim_date: date) -> list[MasterDa
         return []
 
     events: list[MasterDataChangeEvent] = []
+
+    # Quarterly credit limit review — runs on first biz day of quarter, after sim_day 90
+    if config.credit_limit.enabled and is_first_business_day_of_quarter(sim_date):
+        events.extend(_run_credit_limit_review(state, config, sim_date))
 
     result = _try_address_change(state, sim_date)
     if result is not None:

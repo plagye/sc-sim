@@ -151,9 +151,12 @@ def test_initial_inventory_values_are_positive_ints(master_output):
     inventory = _load(master_dir, "initial_inventory.json")
     for wh_code, sku_map in inventory.items():
         assert isinstance(sku_map, dict), f"W{wh_code} should be a dict"
-        for sku, qty in sku_map.items():
-            assert isinstance(qty, int), f"{wh_code}/{sku} qty should be int, got {type(qty)}"
-            assert qty > 0, f"{wh_code}/{sku} qty should be positive, got {qty}"
+        for sku, pos in sku_map.items():
+            # New format: each position is a dict with on_hand/allocated/in_transit
+            assert isinstance(pos, dict), f"{wh_code}/{sku} should be a dict, got {type(pos)}"
+            qty = pos.get("on_hand", 0)
+            assert isinstance(qty, int), f"{wh_code}/{sku} on_hand should be int, got {type(qty)}"
+            assert qty > 0, f"{wh_code}/{sku} on_hand should be positive, got {qty}"
 
 
 def test_initial_customer_balances_all_zero(master_output):

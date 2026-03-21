@@ -91,12 +91,12 @@ def test_positions_contain_seeded_inventory(state, config):
 
 
 def test_quantity_on_hand_matches_state(state, config):
-    """For a seeded SKU in W01, position.quantity_on_hand must match state inventory + allocated."""
+    """For a seeded SKU in W01, position.quantity_on_hand must match state inventory on_hand."""
     # Pick first SKU in W01 inventory
     w01_inventory = state.inventory.get("W01", {})
     assert w01_inventory, "Expected W01 to have seeded inventory"
     sku = next(iter(w01_inventory))
-    expected_available = w01_inventory[sku]
+    expected_on_hand = w01_inventory[sku]["on_hand"]
 
     events = run(state, config, _BUSINESS_DAY)
     w01_event = next(e for e in events if e.warehouse == "W01")
@@ -104,8 +104,8 @@ def test_quantity_on_hand_matches_state(state, config):
 
     assert sku in pos_map, f"SKU {sku} not in snapshot positions"
     pos = pos_map[sku]
-    # No open orders in fresh state, so on_hand == available quantity in state
-    assert pos.quantity_on_hand == expected_available
+    # on_hand is read directly from state.inventory[wh][sku]["on_hand"]
+    assert pos.quantity_on_hand == expected_on_hand
 
 
 def test_quantity_allocated_zero_when_none_allocated(state, config):
@@ -121,30 +121,16 @@ def test_quantity_allocated_zero_when_none_allocated(state, config):
 
 
 def test_quantity_available_equals_onhand_minus_allocated(state, config):
-    """Manually inject an allocated-but-not-shipped order line, then verify quantity_available."""
+    """Directly set allocated in inventory position, verify snapshot quantity_available == on_hand - allocated."""
     w01_inventory = state.inventory.get("W01", {})
     sku = next(iter(w01_inventory))
-    on_hand_available = w01_inventory[sku]
+    pos = w01_inventory[sku]
+    on_hand = pos["on_hand"]
 
-    # Inject a fake open order with an allocated line for this SKU in W01
-    allocated_qty = min(5, on_hand_available)
-    fake_order_id = "ORD-TEST-000001"
-    state.open_orders[fake_order_id] = {
-        "order_id": fake_order_id,
-        "status": "allocated",
-        "lines": [
-            {
-                "line_id": f"{fake_order_id}-L1",
-                "sku": sku,
-                "warehouse_id": "W01",
-                "quantity_ordered": allocated_qty,
-                "quantity_allocated": allocated_qty,
-                "quantity_shipped": 0,
-                "quantity_backordered": 0,
-                "line_status": "allocated",
-            }
-        ],
-    }
+    # Inject allocated units into the inventory position directly
+    allocated_qty = min(5, on_hand)
+    original_allocated = pos["allocated"]
+    pos["allocated"] = allocated_qty
 
     try:
         events = run(state, config, _BUSINESS_DAY)
@@ -152,50 +138,24 @@ def test_quantity_available_equals_onhand_minus_allocated(state, config):
         pos_map = {p.sku: p for p in w01_event.positions}
 
         assert sku in pos_map
-        pos = pos_map[sku]
-        # on_hand = state.inventory (available) + allocated_qty
-        expected_on_hand = on_hand_available + allocated_qty
-        assert pos.quantity_on_hand == expected_on_hand
-        assert pos.quantity_allocated == allocated_qty
-        assert pos.quantity_available == expected_on_hand - allocated_qty
+        snap_pos = pos_map[sku]
+        assert snap_pos.quantity_on_hand == on_hand
+        assert snap_pos.quantity_allocated == allocated_qty
+        assert snap_pos.quantity_available == max(0, on_hand - allocated_qty)
     finally:
-        # Clean up injected order
-        state.open_orders.pop(fake_order_id, None)
+        pos["allocated"] = original_allocated
 
 
 def test_quantity_available_clamped_to_zero(state, config):
-    """Simulate fully-picked SKU: state.inventory == 0 but allocated units remain.
-
-    After the allocation engine picks all available units (setting
-    state.inventory to 0) and the order is still in-transit, the snapshot
-    must report quantity_available == 0.
-    """
+    """Simulate fully-allocated SKU: allocated >= on_hand → quantity_available clamped to 0."""
     w01_inventory = state.inventory.get("W01", {})
     sku = next(iter(w01_inventory))
-    original_qty = w01_inventory[sku]
+    pos = w01_inventory[sku]
+    original_allocated = pos["allocated"]
+    on_hand = pos["on_hand"]
 
-    # Simulate that the allocation engine has picked all units (inventory → 0)
-    state.inventory["W01"][sku] = 0
-
-    # The order that holds those units is still open (not yet shipped)
-    allocated_qty = original_qty
-    fake_order_id = "ORD-TEST-000002"
-    state.open_orders[fake_order_id] = {
-        "order_id": fake_order_id,
-        "status": "allocated",
-        "lines": [
-            {
-                "line_id": f"{fake_order_id}-L1",
-                "sku": sku,
-                "warehouse_id": "W01",
-                "quantity_ordered": allocated_qty,
-                "quantity_allocated": allocated_qty,
-                "quantity_shipped": 0,
-                "quantity_backordered": 0,
-                "line_status": "allocated",
-            }
-        ],
-    }
+    # Set allocated > on_hand to force the clamp
+    pos["allocated"] = on_hand + 5
 
     try:
         events = run(state, config, _BUSINESS_DAY)
@@ -203,21 +163,19 @@ def test_quantity_available_clamped_to_zero(state, config):
         pos_map = {p.sku: p for p in w01_event.positions}
 
         assert sku in pos_map
-        pos = pos_map[sku]
-        # on_hand = 0 (state.inventory) + allocated_qty → all units are allocated
-        # available = max(0, on_hand - allocated) = max(0, allocated_qty - allocated_qty) = 0
-        assert pos.quantity_available == 0
-        assert pos.quantity_allocated == allocated_qty
+        snap_pos = pos_map[sku]
+        # available = max(0, on_hand - allocated) = max(0, on_hand - (on_hand+5)) = 0
+        assert snap_pos.quantity_available == 0
+        assert snap_pos.quantity_allocated == on_hand + 5
     finally:
-        state.open_orders.pop(fake_order_id, None)
-        state.inventory["W01"][sku] = original_qty
+        pos["allocated"] = original_allocated
 
 
 def test_zero_inventory_skus_excluded(state, config):
-    """SKUs with qty == 0 in state.inventory should not appear in positions."""
+    """SKUs with on_hand == 0 in state.inventory should not appear in positions."""
     # Insert a zero-qty SKU into W01
     fake_sku = "FF-GATE-DN15-CS-PN16-FL-M-ZERO"
-    state.inventory["W01"][fake_sku] = 0
+    state.inventory["W01"][fake_sku] = {"on_hand": 0, "allocated": 0, "in_transit": 0}
 
     try:
         events = run(state, config, _BUSINESS_DAY)

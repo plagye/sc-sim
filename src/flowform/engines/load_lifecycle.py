@@ -21,13 +21,33 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel
 
 from flowform.config import Config
 from flowform.engines.carrier_events import DISRUPTION_SEVERITY_PENALTY
 from flowform.engines.load_planning import LoadEvent
 from flowform.master_data.carriers import reliability_on_date as _carrier_reliability
 from flowform.state import SimulationState
+
+
+# ---------------------------------------------------------------------------
+# ShipmentConfirmationEvent schema
+# ---------------------------------------------------------------------------
+
+
+class ShipmentConfirmationEvent(BaseModel):
+    event_type: Literal["shipment_confirmation"] = "shipment_confirmation"
+    event_id: str                  # SHIP-YYYYMMDD-NNNN
+    confirmation_date: str         # ISO date, sim_date
+    load_id: str
+    order_id: str
+    carrier_code: str
+    source_warehouse_id: str
+    lines: list[dict]              # [{line_id, sku, qty_shipped, unit_price}]
+    total_qty_shipped: int
+    total_value_pln: float
 
 # ---------------------------------------------------------------------------
 # Transit duration constants — inclusive [min, max] calendar days
@@ -107,20 +127,92 @@ def _make_load_event(load: dict[str, Any], sim_date: date) -> LoadEvent:
     )
 
 
+def _schedule_payment(
+    state: SimulationState,
+    config: Config,
+    customer_id: str,
+    amount_pln: float,
+    invoice_date: date,
+    invoice_ref: str,
+) -> None:
+    """Append one scheduled payment entry to ``state.scheduled_payments``.
+
+    Draws ``behaviour`` at invoice time (82% on_time / 15% late / 3% very_late)
+    and computes ``due_date`` by advancing *n* business days from *invoice_date*,
+    where *n* is a jitter drawn from the behaviour-specific range.
+
+    Args:
+        state:        Mutable simulation state.
+        config:       Validated simulation config (for payment probabilities).
+        customer_id:  Customer being invoiced.
+        amount_pln:   Invoice amount in PLN.
+        invoice_date: The delivery (invoice) date.
+        invoice_ref:  Shipment confirmation ID or load_id.
+    """
+    on_time_prob = config.payments.on_time_probability
+    late_prob = config.payments.late_probability
+
+    roll = state.rng.random()
+    if roll < on_time_prob:
+        behaviour = "on_time"
+        jitter = state.rng.randint(-3, 10)
+    elif roll < on_time_prob + late_prob:
+        behaviour = "late"
+        jitter = state.rng.randint(5, 30)
+    else:
+        behaviour = "very_late"
+        jitter = state.rng.randint(20, 60)
+
+    # Jitter is in business days; negative jitter (on_time only) means early payment.
+    # For negative jitter, step backward business days from invoice_date.
+    if jitter >= 0:
+        due_date = _advance_business_days(invoice_date, jitter)
+    else:
+        # Step backward by abs(jitter) business days.
+        from flowform.calendar import is_business_day
+        current = invoice_date
+        remaining = abs(jitter)
+        while remaining > 0:
+            current -= timedelta(days=1)
+            if is_business_day(current):
+                remaining -= 1
+        # Never let due_date be before the invoice_date itself.
+        due_date = max(current, invoice_date)
+
+    state.scheduled_payments.append({
+        "customer_id": customer_id,
+        "amount_pln": round(amount_pln, 2),
+        "due_date": due_date.isoformat(),
+        "behaviour": behaviour,
+        "invoice_ref": invoice_ref,
+    })
+
+
 def _update_order_lines_on_delivery(
     state: SimulationState,
     load: dict[str, Any],
-) -> None:
+    sim_date: date,
+    config: Config | None = None,
+) -> list[ShipmentConfirmationEvent]:
     """Mark all allocated lines on orders in this load as shipped.
 
     Also invoices the shipped value into ``state.customer_balances`` so the
-    payment engine has a positive balance to work with.
+    payment engine has a positive balance to work with, and schedules a future
+    payment entry in ``state.scheduled_payments``.
 
     Args:
-        state: Mutable simulation state (for ``open_orders`` access).
-        load:  Delivered load record.
+        state:    Mutable simulation state (for ``open_orders`` access).
+        load:     Delivered load record.
+        sim_date: The simulation date of delivery (used for confirmation events).
+        config:   Validated simulation config (for payment scheduling). When
+                  ``None``, payment scheduling is skipped (legacy path).
+
+    Returns:
+        List of :class:`ShipmentConfirmationEvent` — one per order on the load.
     """
     from flowform.engines._order_utils import update_order_status
+
+    confirmation_events: list[ShipmentConfirmationEvent] = []
 
     for oid in load.get("order_ids", []):
         order = state.open_orders.get(oid)
@@ -140,12 +232,32 @@ def _update_order_lines_on_delivery(
             rate = 1.0
 
         shipped_value_pln = 0.0
+        shipped_lines: list[dict] = []
+        source_wh = load.get("source_warehouse_id", "W01")
         for line in order.get("lines", []):
             if line.get("line_status") == "allocated":
                 line["line_status"] = "shipped"
                 shipped_qty: int = line.get("quantity_allocated", 0)
                 line["quantity_shipped"] = shipped_qty
-                shipped_value_pln += shipped_qty * line.get("unit_price", 0.0) * rate
+                unit_price: float = line.get("unit_price", 0.0)
+                shipped_value_pln += shipped_qty * unit_price * rate
+                shipped_lines.append({
+                    "line_id": line.get("line_id", ""),
+                    "sku": line.get("sku", ""),
+                    "qty_shipped": shipped_qty,
+                    "unit_price": unit_price,
+                })
+
+                # Decrement both on_hand and allocated in the inventory position.
+                # At allocation time we reserved units (allocated += qty) without
+                # touching on_hand.  At shipment we physically dispatch them so
+                # both counters must decrease.
+                sku = line.get("sku", "")
+                wh_inv = state.inventory.get(source_wh, {})
+                pos = wh_inv.get(sku)
+                if pos is not None and shipped_qty > 0:
+                    pos["on_hand"] = max(0, pos["on_hand"] - shipped_qty)
+                    pos["allocated"] = max(0, pos["allocated"] - shipped_qty)
 
                 # Clean up state.allocated so stale entries don't accumulate
                 line_id = line.get("line_id")
@@ -159,6 +271,34 @@ def _update_order_lines_on_delivery(
 
         update_order_status(order)
 
+        if shipped_lines:
+            seq = state.next_id("ship")
+            event_id = f"SHIP-{sim_date.strftime('%Y%m%d')}-{seq:04d}"
+            confirmation_events.append(ShipmentConfirmationEvent(
+                event_id=event_id,
+                confirmation_date=sim_date.isoformat(),
+                load_id=load["load_id"],
+                order_id=oid,
+                carrier_code=load.get("carrier_code", ""),
+                source_warehouse_id=load.get("source_warehouse_id", ""),
+                lines=shipped_lines,
+                total_qty_shipped=sum(l["qty_shipped"] for l in shipped_lines),
+                total_value_pln=round(shipped_value_pln, 2),
+            ))
+
+            # Schedule the payment for this invoice.
+            if config is not None and customer_id and shipped_value_pln > 0.0:
+                _schedule_payment(
+                    state=state,
+                    config=config,
+                    customer_id=customer_id,
+                    amount_pln=shipped_value_pln,
+                    invoice_date=sim_date,
+                    invoice_ref=event_id,
+                )
+
+    return confirmation_events
+
 
 # ---------------------------------------------------------------------------
 # Engine entry point
@@ -169,7 +309,7 @@ def run(
     state: SimulationState,
     config: Config,
     sim_date: date,
-) -> list[LoadEvent]:
+) -> list[LoadEvent | ShipmentConfirmationEvent]:
     """Run the load lifecycle engine for *sim_date*.
 
     Runs every calendar day — carriers operate 7 days a week.
@@ -181,11 +321,12 @@ def run(
         sim_date: The simulated calendar date to process.
 
     Returns:
-        List of :class:`LoadEvent` instances for any transitions that fired today.
+        List of :class:`LoadEvent` and :class:`ShipmentConfirmationEvent`
+        instances for any transitions that fired today.
     """
     from flowform.calendar import is_business_day
 
-    events: list[LoadEvent] = []
+    events: list[LoadEvent | ShipmentConfirmationEvent] = []
 
     for load in state.active_loads.values():
         status = load.get("status", "")
@@ -321,7 +462,8 @@ def run(
                 "pod_due_date": pod_due_date.isoformat(),
             }
 
-            _update_order_lines_on_delivery(state, load)
+            confirmation_events = _update_order_lines_on_delivery(state, load, sim_date, config)
+            events.extend(confirmation_events)
 
             events.append(_make_load_event(load, sim_date))
             continue

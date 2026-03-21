@@ -72,3 +72,12 @@ noise:
 
 disruptions:
   enabled: true
+
+credit_limit:
+  enabled: true
+  growth_min: 0.05
+  growth_max: 0.15
+  max_multiplier: 3.0
+
+catalog:
+  max_unit_price_pln: 25000.0

@@ -205,6 +205,107 @@ def _process_reclassifications(
 
 
 # ---------------------------------------------------------------------------
+# Demand-weighted SKU selection
+# ---------------------------------------------------------------------------
+
+_DEFAULT_TARGET_STOCK = 150
+
+
+_BACKORDER_BOOST = 5.0  # Multiplier for SKUs with active backorders at zero stock
+
+
+def _skus_with_backorders(state: "SimulationState") -> set[str]:
+    """Return the set of SKUs that have at least one backordered order line.
+
+    Used by :func:`_production_sku_weights` to apply the backorder boost.
+    """
+    skus: set[str] = set()
+    for order in state.open_orders.values():
+        for line in order.get("lines", []):
+            if line.get("line_status") in ("backordered", "partially_allocated"):
+                skus.add(line["sku"])
+    return skus
+
+
+def _production_sku_weights(state: "SimulationState", config: "Config") -> list[float]:
+    """Compute blended selection weights for every SKU in state.catalog.
+
+    Three signals are blended per SKU:
+
+    1. days_since_norm: how long ago the SKU was last produced (normalised 0–1).
+       SKUs never produced get ``state.sim_day`` (maximum urgency).
+    2. stock_pressure: how far below the target stock the SKU currently sits,
+       normalised to [0, 1].  SKUs at or above target get 0.
+    3. backorder_boost: SKUs with active backordered demand that are at zero
+       on-hand inventory receive a ``_BACKORDER_BOOST`` (5×) multiplier applied
+       after the base blend.  This models the factory urgently scheduling
+       production runs to clear customer backorder queues.
+
+    Base blend: ``weight = 0.4 * days_since_norm + 0.6 * stock_pressure``
+    Then: if SKU has backorders AND on_hand == 0: weight *= _BACKORDER_BOOST
+
+    If every weight is 0 (all SKUs produced today and all above target), a
+    uniform list of 1.0s is returned so ``rng.choices`` keeps working.
+
+    Args:
+        state:  Current simulation state.
+        config: Simulation config (accepted for interface consistency; unused).
+
+    Returns:
+        A list of floats, one per entry in ``state.catalog``, suitable for
+        passing as the ``weights`` argument of ``random.choices()``.
+    """
+    catalog = state.catalog
+    n = len(catalog)
+    if n == 0:
+        return []
+
+    # --- days_since signal ---
+    raw_days: list[float] = []
+    for entry in catalog:
+        last = state.last_produced.get(entry.sku, 0)
+        raw_days.append(float(state.sim_day - last))
+
+    max_days = max(raw_days) if raw_days else 1.0
+    if max_days == 0.0:
+        max_days = 1.0  # guard division-by-zero when sim_day == 0
+    days_since_norm = [d / max_days for d in raw_days]
+
+    # --- stock_pressure signal ---
+    w01 = state.inventory.get("W01", {})
+    stock_pressure: list[float] = []
+    for entry in catalog:
+        target = float(state.inventory_target_stock.get(entry.sku, _DEFAULT_TARGET_STOCK))
+        on_hand = float(w01.get(entry.sku, {}).get("on_hand", 0))
+        if target <= 0:
+            sp = 0.0
+        else:
+            sp = max(0.0, (target - on_hand) / target)
+        stock_pressure.append(sp)
+
+    # --- base blend ---
+    weights = [
+        0.4 * ds + 0.6 * sp
+        for ds, sp in zip(days_since_norm, stock_pressure)
+    ]
+
+    # --- backorder boost ---
+    # SKUs with active demand backlogged AND zero inventory get a strong boost.
+    # This prevents popular SKUs from sitting at zero while production ignores them.
+    backordered_skus = _skus_with_backorders(state)
+    if backordered_skus:
+        for i, entry in enumerate(catalog):
+            if entry.sku in backordered_skus and w01.get(entry.sku, {}).get("on_hand", 0) == 0:
+                weights[i] *= _BACKORDER_BOOST
+
+    # Fallback to uniform if every weight is zero
+    if all(w == 0.0 for w in weights):
+        return [1.0] * n
+
+    return weights
+
+
+# ---------------------------------------------------------------------------
 # Engine entry point
 # ---------------------------------------------------------------------------
 
@@ -255,8 +356,9 @@ def run(
     # --- Distribute units across batches ---
     batch_quantities = _distribute_units(total_units, n_batches, state.rng)
 
-    # --- Pick SKUs (uniform from active catalog) ---
-    skus_chosen = state.rng.choices(state.catalog, k=n_batches)
+    # --- Pick SKUs (demand-weighted from active catalog) ---
+    sku_weights = _production_sku_weights(state, config)
+    skus_chosen = state.rng.choices(state.catalog, weights=sku_weights, k=n_batches)
 
     # --- Emit one completion event per batch ---
     for i in range(n_batches):
@@ -282,10 +384,13 @@ def run(
         )
         events.append(event)
 
+        # Record that this SKU was produced today (for demand-weighted selection)
+        state.last_produced[entry.sku] = state.sim_day
+
         # Update W01 inventory for Grade A and B (REJECT goes nowhere)
         if grade in ("A", "B"):
-            current = state.inventory["W01"].get(entry.sku, 0)
-            state.inventory["W01"][entry.sku] = current + quantity
+            pos = state.inventory["W01"].setdefault(entry.sku, {"on_hand": 0, "allocated": 0, "in_transit": 0})
+            pos["on_hand"] += quantity
             # Record receipt so the inventory_movements engine can create a
             # matching receipt movement event without duplicating production logic.
             state.daily_production_receipts.append(

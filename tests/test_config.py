@@ -138,7 +138,7 @@ class TestLoadConfigValid:
         assert config.noise.profile == NoiseProfile.medium
 
         # disruptions section
-        assert config.disruptions.enabled is False
+        assert config.disruptions.enabled is True
 
     def test_returns_config_instance(self) -> None:
         config = load_config(CONFIG_PATH)

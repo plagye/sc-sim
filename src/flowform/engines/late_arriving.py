@@ -8,7 +8,7 @@ Applies three realism mechanisms after all engines have run for a given day:
    ``load_event`` uses ``simulation_date`` instead and is left untouched here.
 
 2. **ERP inventory movement carry-forward** (~2%): withhold a random subset of
-   ``inventory_movement`` events from today's output.  They are stored in
+   ``inventory_movements`` events from today's output.  They are stored in
    ``state.deferred_erp_movements`` and prepended to the *next* day's event list.
 
 3. **TMS maintenance burst** (~1/22 probability, max once per calendar month):
@@ -139,12 +139,12 @@ def apply(
     state.deferred_erp_movements = []
 
     # ------------------------------------------------------------------
-    # Step B: Separate today's inventory_movement events to decide which
+    # Step B: Separate today's inventory_movements events to decide which
     #         to defer to tomorrow
     # ------------------------------------------------------------------
     today_movements: list[tuple[int, Any]] = [
         (i, e) for i, e in enumerate(result)
-        if _get_event_type(e) == "inventory_movement"
+        if _get_event_type(e) == "inventory_movements"
     ]
 
     deferred_indices: set[int] = set()

@@ -107,19 +107,24 @@ def _find_eligible_skus(
 
     eligible: list[tuple[str, int]] = []
 
-    for sku, w02_qty in w02_inv.items():
-        w01_qty = w01_inv.get(sku, 0)
-        if w01_qty <= 0:
-            continue  # no source stock
+    for sku, w02_pos in w02_inv.items():
+        w02_qty = w02_pos.get("on_hand", 0)
+        w01_pos = w01_inv.get(sku)
+        w01_qty = w01_pos.get("on_hand", 0) if w01_pos else 0
+        # Only transfer available (unallocated) units to preserve invariant
+        w01_allocated = w01_pos.get("allocated", 0) if w01_pos else 0
+        w01_available = max(0, w01_qty - w01_allocated)
+        if w01_available <= 0:
+            continue  # no unallocated source stock
 
         threshold = math.ceil(threshold_pct * w01_qty)
         if w02_qty >= threshold:
             continue  # W02 adequately stocked
 
-        # Compute transfer quantity
+        # Compute transfer quantity — capped at available (not on_hand)
         target_qty = math.ceil(_REPLENISHMENT_TARGET * w01_qty)
         transfer_qty = max(1, target_qty - w02_qty)
-        transfer_qty = min(transfer_qty, w01_qty)
+        transfer_qty = min(transfer_qty, w01_available)
 
         eligible.append((sku, transfer_qty))
 
@@ -185,10 +190,13 @@ def run(
     events: list[InventoryMovementEvent] = []
 
     for sku, transfer_qty in selected:
-        # Mutate inventory
-        state.inventory["W01"][sku] -= transfer_qty
+        # Mutate inventory: same-day settlement (no in_transit used)
+        state.inventory["W01"][sku]["on_hand"] -= transfer_qty
         w02 = state.inventory.setdefault("W02", {})
-        w02[sku] = w02.get(sku, 0) + transfer_qty
+        if sku in w02:
+            w02[sku]["on_hand"] += transfer_qty
+        else:
+            w02[sku] = {"on_hand": transfer_qty, "allocated": 0, "in_transit": 0}
 
         # Outbound leg: W01 → W02
         events.append(

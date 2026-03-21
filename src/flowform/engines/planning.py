@@ -11,6 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from flowform.adm._calibration import _expected_monthly_units_per_group
 from flowform.calendar import is_business_day, is_first_business_day_of_month
 from flowform.config import Config
 from flowform.state import SimulationState
@@ -119,6 +120,9 @@ def run(
 
     segments = list(_SEGMENT_FACTORS.keys())
 
+    # Compute calibrated baseline once — expected monthly units per product group
+    baseline = _expected_monthly_units_per_group(state, config)
+
     plan_lines: list[PlanLine] = []
 
     for product_group in selected_groups:
@@ -134,8 +138,11 @@ def run(
                     target_year += 1
 
                 monthly_mult = config.demand.base_monthly_multipliers[target_month]
-                base_qty = rng.randint(80, 600)
+                base_qty = round(baseline.get(product_group, rng.randint(80, 600)))
                 planned = round(base_qty * monthly_mult * seg_factor)
+                # Ensure non-zero plan when baseline is positive (rounding can floor to 0)
+                if base_qty > 0 and planned == 0:
+                    planned = 1
                 conf_low = round(planned * 0.75)
                 conf_high = round(planned * 1.30)
 

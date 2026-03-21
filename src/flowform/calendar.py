@@ -193,3 +193,31 @@ def is_first_business_day_of_month(sim_date: date) -> bool:
         if is_business_day(earlier):
             return False
     return True
+
+
+def is_first_business_day_of_quarter(sim_date: date) -> bool:
+    """Return True if sim_date is the first business day of its calendar quarter.
+
+    Quarters: Q1=Jan–Mar, Q2=Apr–Jun, Q3=Jul–Sep, Q4=Oct–Dec.
+    Returns True only if sim_date is a business day AND no earlier business day
+    exists in the same quarter.
+
+    Args:
+        sim_date: The candidate date.
+
+    Returns:
+        True if sim_date is a business day and no earlier day in the same
+        calendar quarter is also a business day.
+    """
+    if not is_business_day(sim_date):
+        return False
+    # Determine the first month of the current quarter
+    quarter_start_month = ((sim_date.month - 1) // 3) * 3 + 1
+    quarter_start = date(sim_date.year, quarter_start_month, 1)
+    # Iterate over all days from quarter start up to (but not including) sim_date
+    day = quarter_start
+    while day < sim_date:
+        if is_business_day(day):
+            return False
+        day += timedelta(days=1)
+    return True

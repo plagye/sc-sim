@@ -124,7 +124,7 @@ def _seed_initial_inventory(
     catalog: list[CatalogEntry],
     warehouses: list[Warehouse],
     rng: random.Random,
-) -> dict[str, dict[str, int]]:
+) -> dict[str, dict[str, dict[str, int]]]:
     """Generate realistic starting inventory across warehouses.
 
     ~65% of catalog SKUs get initial stock.  W01 is primary (80% split);
@@ -136,19 +136,21 @@ def _seed_initial_inventory(
         rng:        Seeded RNG for reproducibility.
 
     Returns:
-        Nested dict ``{warehouse_code: {sku: quantity}}``.
+        Nested dict ``{warehouse_code: {sku: {"on_hand": int, "allocated": int,
+        "in_transit": int}}}``.
     """
-    inventory: dict[str, dict[str, int]] = {w.code: {} for w in warehouses}
+    inventory: dict[str, dict[str, dict[str, int]]] = {w.code: {} for w in warehouses}
 
     for entry in catalog:
         if rng.random() > 0.65:
             continue  # ~35% of SKUs not stocked at start
 
         w01_qty = rng.randint(20, 300)
-        inventory["W01"][entry.sku] = w01_qty
+        inventory["W01"][entry.sku] = {"on_hand": w01_qty, "allocated": 0, "in_transit": 0}
 
         if rng.random() < 0.50:
-            inventory["W02"][entry.sku] = max(1, int(w01_qty * rng.uniform(0.05, 0.25)))
+            w02_qty = max(1, int(w01_qty * rng.uniform(0.05, 0.25)))
+            inventory["W02"][entry.sku] = {"on_hand": w02_qty, "allocated": 0, "in_transit": 0}
 
     return inventory
 
@@ -180,7 +182,7 @@ class SimulationState:
         customers: list[Customer],
         carriers: list[Carrier],
         warehouses: list[Warehouse],
-        inventory: dict[str, dict[str, int]],
+        inventory: dict[str, dict[str, dict[str, int]]],
         allocated: dict[str, dict[str, int]],
         open_orders: dict[str, dict[str, Any]],
         customer_balances: dict[str, float],
@@ -197,6 +199,10 @@ class SimulationState:
         deferred_erp_movements: list[dict[str, Any]] | None = None,
         tms_maintenance_fired_month: str = "",
         supply_disruptions: dict[str, dict[str, Any]] | None = None,
+        initial_credit_limits: dict[str, float] | None = None,
+        last_produced: dict[str, int] | None = None,
+        inventory_target_stock: dict[str, int] | None = None,
+        scheduled_payments: list[dict[str, Any]] | None = None,
     ) -> None:
         self._db_path = db_path
         self.sim_day = sim_day
@@ -243,6 +249,27 @@ class SimulationState:
         self.supply_disruptions: dict[str, dict[str, Any]] = (
             supply_disruptions if supply_disruptions is not None else {}
         )
+        # Initial credit limits snapshot: customer_id → original credit_limit at sim start.
+        # Used by the quarterly credit limit review to cap growth at max_multiplier × initial.
+        self.initial_credit_limits: dict[str, float] = (
+            initial_credit_limits if initial_credit_limits is not None else {}
+        )
+        # Tracks the sim_day when each SKU was last produced (0 = never).
+        # Used by the production engine to bias SKU selection toward stale/depleted SKUs.
+        self.last_produced: dict[str, int] = (
+            last_produced if last_produced is not None else {}
+        )
+        # Target stock level per SKU (populated by inventory_targets engine monthly).
+        # Used by production engine to compute stock_pressure weight.
+        self.inventory_target_stock: dict[str, int] = (
+            inventory_target_stock if inventory_target_stock is not None else {}
+        )
+        # Scheduled future payments: each entry has customer_id, amount_pln,
+        # due_date (ISO string), behaviour, invoice_ref.
+        # Populated by load_lifecycle at delivery time; processed by payments.py.
+        self.scheduled_payments: list[dict[str, Any]] = (
+            scheduled_payments if scheduled_payments is not None else []
+        )
 
         # ---------------------------------------------------------------------------
         # Performance optimisation caches (ephemeral — not persisted to SQLite)
@@ -253,15 +280,6 @@ class SimulationState:
         # Cleared by credit.run() after processing.
         self._credit_dirty: set[str] = set()
 
-        # Opt-B: Set of kv_state keys modified since the last save().
-        # _write_operational() only serialises keys in this set.
-        # Always serialises sim_meta and counters regardless.
-        self._dirty: set[str] = set()
-
-        # Opt-D: Sorted order-ID list + hash for allocation sort cache.
-        # When open_orders hasn't changed, reuse the previous sorted list.
-        self._sorted_order_ids: list[str] = []
-        self._orders_snapshot_hash: int = 0
 
     # ------------------------------------------------------------------
     # Public class methods
@@ -290,6 +308,11 @@ class SimulationState:
         carriers = list(ALL_CARRIERS)
         warehouses = list(ALL_WAREHOUSES)
 
+        # Snapshot initial credit limits for quarterly review cap logic
+        initial_credit_limits: dict[str, float] = {
+            c.customer_id: c.credit_limit for c in customers
+        }
+
         # Initialise operational tables
         inventory = _seed_initial_inventory(catalog, warehouses, rng)
         allocated: dict[str, dict[str, int]] = {w.code: {} for w in warehouses}
@@ -308,6 +331,7 @@ class SimulationState:
             "return": 1000,
             "signal": 0,
             "disruption": 0,
+            "ship": 0,
         }
         production_pipeline: list[dict[str, Any]] = []
 
@@ -337,6 +361,10 @@ class SimulationState:
             deferred_erp_movements=[],
             tms_maintenance_fired_month="",
             supply_disruptions={},
+            initial_credit_limits=initial_credit_limits,
+            last_produced={},
+            inventory_target_stock={},
+            scheduled_payments=[],
         )
         state.save()
         return state
@@ -432,18 +460,6 @@ class SimulationState:
         self.counters["movement"] += 1
         return f"MOV-{self.counters['movement']}"
 
-    def mark_dirty(self, key: str) -> None:
-        """Mark a kv_state key as modified so _write_operational() serialises it.
-
-        Engines that mutate a specific field (e.g. 'inventory', 'open_orders')
-        call this to avoid a full re-serialisation of all 16 kv_state keys on
-        every save.  Keys 'sim_meta' and 'counters' are always serialised
-        regardless of dirty tracking.
-
-        Args:
-            key: A kv_state key name (e.g. 'inventory', 'open_orders').
-        """
-        self._dirty.add(key)
 
     # ------------------------------------------------------------------
     # Internal: schema creation
@@ -570,15 +586,13 @@ class SimulationState:
             "deferred_erp_movements": self.deferred_erp_movements,
             "tms_maintenance_fired_month": self.tms_maintenance_fired_month,
             "supply_disruptions": self.supply_disruptions,
+            "initial_credit_limits": self.initial_credit_limits,
+            "last_produced": self.last_produced,
+            "inventory_target_stock": self.inventory_target_stock,
+            "scheduled_payments": self.scheduled_payments,
         }
 
-        # Opt-B: Only write keys that changed, plus always-required keys.
-        # On first save (dirty set is empty), write everything.
-        always_write = {"counters", "schema_flags"}
-        if self._dirty:
-            ops = {k: v for k, v in all_ops.items() if k in self._dirty or k in always_write}
-        else:
-            ops = all_ops
+        ops = all_ops
 
         for key, value in ops.items():
             conn.execute(
@@ -586,9 +600,6 @@ class SimulationState:
                 " ON CONFLICT(key) DO UPDATE SET data = excluded.data",
                 (key, json.dumps(value)),
             )
-
-        # Clear dirty set after a successful write
-        self._dirty.clear()
 
     # ------------------------------------------------------------------
     # Internal: load from connection
@@ -642,7 +653,18 @@ class SimulationState:
                 return None
             return json.loads(row[0])
 
-        inventory: dict[str, dict[str, int]] = _kv("inventory") or {}
+        raw_inventory: dict[str, Any] = _kv("inventory") or {}
+        # Migration: old format stored inventory[wh][sku] as a bare int.
+        # New format stores {"on_hand": int, "allocated": int, "in_transit": int}.
+        # Detect and convert transparently so existing databases can be resumed.
+        inventory: dict[str, dict[str, dict[str, int]]] = {}
+        for wh_code, wh_inv in raw_inventory.items():
+            inventory[wh_code] = {}
+            for sku, val in wh_inv.items():
+                if isinstance(val, int):
+                    inventory[wh_code][sku] = {"on_hand": val, "allocated": 0, "in_transit": 0}
+                else:
+                    inventory[wh_code][sku] = val
         allocated: dict[str, dict[str, int]] = _kv("allocated") or {}
         open_orders: dict[str, dict[str, Any]] = _kv("open_orders") or {}
         customer_balances: dict[str, float] = _kv("customer_balances") or {}
@@ -668,6 +690,16 @@ class SimulationState:
         supply_disruptions: dict[str, dict[str, Any]] = (
             _kv("supply_disruptions") or {}
         )
+        initial_credit_limits: dict[str, float] = (
+            _kv("initial_credit_limits") or {}
+        )
+        # Migration: backfill for DBs created before Step 51 (initial_credit_limits absent).
+        if not initial_credit_limits and customers:
+            initial_credit_limits = {c.customer_id: c.credit_limit for c in customers}
+
+        last_produced: dict[str, int] = _kv("last_produced") or {}
+        inventory_target_stock: dict[str, int] = _kv("inventory_target_stock") or {}
+        scheduled_payments: list[dict[str, Any]] = _kv("scheduled_payments") or []
 
         return cls(
             db_path=db_path,
@@ -695,4 +727,8 @@ class SimulationState:
             deferred_erp_movements=deferred_erp_movements,
             tms_maintenance_fired_month=tms_maintenance_fired_month,
             supply_disruptions=supply_disruptions,
+            initial_credit_limits=initial_credit_limits,
+            last_produced=last_produced,
+            inventory_target_stock=inventory_target_stock,
+            scheduled_payments=scheduled_payments,
         )

@@ -1,7 +1,8 @@
 """Payment processing engine for FlowForm Industries.
 
-Simulates customers paying outstanding invoices, reducing customer balances
-and potentially releasing credit holds when exposure drops below the limit.
+Processes customer payments from ``state.scheduled_payments``: fires all
+entries whose ``due_date <= sim_date``, reduces customer balances, and
+potentially releases credit holds when exposure drops below the limit.
 
 Runs on business days only.
 
@@ -41,6 +42,7 @@ class PaymentEvent(BaseModel):
     balance_after_pln: float        # balance after, rounded to 2 dp
     payment_behaviour: str          # "on_time" | "late" | "very_late"
     payment_terms_days: int         # customer.payment_terms_days
+    invoice_ref: str                # shipment_confirmation_id or load_id
 
 
 # ---------------------------------------------------------------------------
@@ -53,23 +55,27 @@ def run(
     config: Config,
     sim_date: date,
 ) -> list[PaymentEvent | CreditReleaseEvent]:
-    """Process customer payments on *sim_date*.
+    """Process scheduled customer payments due on or before *sim_date*.
 
-    For each customer with a positive outstanding balance, probabilistically
-    decides whether a payment arrives today. Classifies payments as on_time,
-    late, or very_late, updating balances accordingly. After each payment,
-    checks whether any credit-held orders for that customer can be released.
+    Iterates ``state.scheduled_payments``, fires all entries whose
+    ``due_date <= sim_date.isoformat()``, applies the behaviour-specific
+    partial-pay multiplier, reduces customer balances, and removes fired
+    entries from the schedule.
+
+    After each payment, checks whether any credit-held orders for that
+    customer can be released (exposure <= credit_limit).
 
     Args:
-        state:    Mutable simulation state. ``state.customer_balances`` is
-                  reduced in place. ``state.open_orders`` may have order
-                  statuses flipped from ``"credit_hold"`` to ``"confirmed"``.
+        state:    Mutable simulation state.  ``state.customer_balances`` is
+                  reduced in place.  ``state.scheduled_payments`` is pruned.
+                  ``state.open_orders`` may have statuses flipped from
+                  ``"credit_hold"`` to ``"confirmed"``.
         config:   Validated simulation config.
         sim_date: Current simulation date.
 
     Returns:
         List of :class:`PaymentEvent` and :class:`CreditReleaseEvent`
-        instances (empty on non-business days or when no payments occur).
+        instances (empty on non-business days or when no payments are due).
     """
     if not is_business_day(sim_date):
         return []
@@ -77,43 +83,46 @@ def run(
     # Build customer lookup index
     customer_index = {c.customer_id: c for c in state.customers}
 
-    on_time_prob = config.payments.on_time_probability
-    late_prob = config.payments.late_probability
-    # very_late_prob is implicit (remainder), no need to read it separately
-
     events: list[PaymentEvent | CreditReleaseEvent] = []
+    sim_date_str = sim_date.isoformat()
 
-    for customer_id, balance in list(state.customer_balances.items()):
-        if balance <= 0.0:
+    # Collect entries to remove after iteration (avoid mutating while iterating)
+    fired_indices: list[int] = []
+
+    for idx, entry in enumerate(state.scheduled_payments):
+        due_date: str = entry.get("due_date", "")
+        if due_date > sim_date_str:
+            # Not due yet
             continue
+
+        customer_id: str = entry.get("customer_id", "")
+        amount_pln: float = entry.get("amount_pln", 0.0)
+        behaviour: str = entry.get("behaviour", "on_time")
+        invoice_ref: str = entry.get("invoice_ref", "")
 
         customer = customer_index.get(customer_id)
         if customer is None:
+            fired_indices.append(idx)
             continue
 
-        # Daily payment probability derived from payment terms
-        payment_terms_days: int = customer.payment_terms_days
-        daily_prob = 1.0 / payment_terms_days
-
-        # Decide whether this customer pays today
-        if state.rng.random() >= daily_prob:
+        balance = state.customer_balances.get(customer_id, 0.0)
+        if balance <= 0.0:
+            # Nothing to pay — entry is stale; remove it.
+            fired_indices.append(idx)
             continue
 
-        # Determine payment behaviour
-        roll = state.rng.random()
-        if roll < on_time_prob:
-            behaviour = "on_time"
+        # Apply behaviour-specific partial-pay multiplier
+        if behaviour == "on_time":
             fraction = 1.0
-        elif roll < on_time_prob + late_prob:
-            behaviour = "late"
+        elif behaviour == "late":
             fraction = state.rng.uniform(0.50, 0.80)
-        else:
-            behaviour = "very_late"
+        else:  # very_late
             fraction = state.rng.uniform(0.10, 0.30)
 
-        # Calculate and apply payment
+        # The payment amount is the lesser of the scheduled invoice amount
+        # (scaled by fraction) and the current outstanding balance.
+        payment_amount = round(min(amount_pln * fraction, balance), 2)
         balance_before = round(balance, 2)
-        payment_amount = round(balance * fraction, 2)
         balance_after = max(0.0, round(balance - payment_amount, 2))
 
         state.customer_balances[customer_id] = balance_after
@@ -122,15 +131,18 @@ def run(
             PaymentEvent(
                 event_type="payment",
                 event_id=str(uuid.uuid4()),
-                simulation_date=sim_date.isoformat(),
+                simulation_date=sim_date_str,
                 customer_id=customer_id,
                 payment_amount_pln=payment_amount,
                 balance_before_pln=balance_before,
                 balance_after_pln=balance_after,
                 payment_behaviour=behaviour,
-                payment_terms_days=payment_terms_days,
+                payment_terms_days=customer.payment_terms_days,
+                invoice_ref=invoice_ref,
             )
         )
+
+        fired_indices.append(idx)
 
         # Check if credit-held orders can now be released
         new_balance = balance_after
@@ -141,7 +153,6 @@ def run(
         credit_limit: float = customer.credit_limit
 
         if exposure <= credit_limit:
-            # Release all credit-held orders for this customer
             for order_id, order in state.open_orders.items():
                 if order.get("customer_id") != customer_id:
                     continue
@@ -152,7 +163,7 @@ def run(
                     CreditReleaseEvent(
                         event_type="credit_release",
                         event_id=str(uuid.uuid4()),
-                        simulation_date=sim_date.isoformat(),
+                        simulation_date=sim_date_str,
                         order_id=order_id,
                         customer_id=customer_id,
                         customer_balance_pln=round(new_balance, 2),
@@ -161,5 +172,9 @@ def run(
                         exposure_pln=round(exposure, 2),
                     )
                 )
+
+    # Remove fired entries in reverse order to preserve indices
+    for idx in reversed(fired_indices):
+        del state.scheduled_payments[idx]
 
     return events

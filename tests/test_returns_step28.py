@@ -420,7 +420,8 @@ def test_inspected_and_restocked(state, config):
     """A received_at_warehouse RMA inspected today with 80% restock roll must
     emit a ReturnEvent(resolution='restocked') and inventory movement(s)."""
     sku = _any_sku(state)
-    initial_qty = state.inventory.get("W01", {}).get(sku, 0)
+    _pos0 = state.inventory.get("W01", {}).get(sku)
+    initial_qty = _pos0["on_hand"] if _pos0 else 0
     qty_returned = 6
 
     yesterday = _BIZ_DAY - timedelta(days=1)
@@ -471,7 +472,8 @@ def test_inspected_and_restocked(state, config):
     )
 
     # Inventory must have increased in W01 (Grade-A)
-    new_qty = state.inventory.get("W01", {}).get(sku, 0)
+    _pos1 = state.inventory.get("W01", {}).get(sku)
+    new_qty = _pos1["on_hand"] if _pos1 else 0
     assert new_qty == initial_qty + qty_returned, (
         f"Expected W01[{sku}] = {initial_qty + qty_returned}, got {new_qty}"
     )
@@ -486,7 +488,8 @@ def test_inspected_and_scrapped(state, config):
     """A received_at_warehouse RMA inspected today with 20% scrap roll must
     emit a ReturnEvent(resolution='scrapped') and NOT update inventory."""
     sku = _any_sku(state)
-    initial_qty = state.inventory.get("W01", {}).get(sku, 0)
+    _pos0 = state.inventory.get("W01", {}).get(sku)
+    initial_qty = _pos0["on_hand"] if _pos0 else 0
 
     yesterday = _BIZ_DAY - timedelta(days=1)
     rma = {
@@ -533,7 +536,8 @@ def test_inspected_and_scrapped(state, config):
     assert restock_events == [], "No return_restock events expected when scrapped"
 
     # Inventory must be unchanged
-    new_qty = state.inventory.get("W01", {}).get(sku, 0)
+    _pos1 = state.inventory.get("W01", {}).get(sku)
+    new_qty = _pos1["on_hand"] if _pos1 else 0
     assert new_qty == initial_qty, (
         f"Expected W01[{sku}] to remain {initial_qty}, got {new_qty}"
     )
@@ -644,7 +648,8 @@ def test_inspected_and_restocked_grade_b(state, config):
     """A received_at_warehouse RMA with inspection roll in [0.60, 0.85) must
     emit resolution='restocked' with GRADE-B reference and update W02 inventory."""
     sku = _any_sku(state)
-    initial_w02_qty = state.inventory.get("W02", {}).get(sku, 0)
+    _pos0 = state.inventory.get("W02", {}).get(sku)
+    initial_w02_qty = _pos0["on_hand"] if _pos0 else 0
     qty_returned = 4
 
     yesterday = _BIZ_DAY - timedelta(days=1)
@@ -693,7 +698,8 @@ def test_inspected_and_restocked_grade_b(state, config):
     )
 
     # W02 inventory must have increased
-    new_w02_qty = state.inventory.get("W02", {}).get(sku, 0)
+    _pos1 = state.inventory.get("W02", {}).get(sku)
+    new_w02_qty = _pos1["on_hand"] if _pos1 else 0
     assert new_w02_qty == initial_w02_qty + qty_returned, (
         f"Expected W02[{sku}] = {initial_w02_qty + qty_returned}, got {new_w02_qty}"
     )

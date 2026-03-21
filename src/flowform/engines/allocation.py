@@ -216,6 +216,16 @@ def _run_escalation(
                 if state.rng.random() < _CANCEL_PROB:
                     qty_cancelled = line.get("quantity_backordered", 0)
                     if qty_cancelled > 0:
+                        # Release any partially-allocated inventory reservation
+                        qty_alloc = line.get("quantity_allocated", 0)
+                        if qty_alloc > 0:
+                            sku = line.get("sku", "")
+                            wh = _warehouse_for_line(line)
+                            pos = state.inventory.get(wh, {}).get(sku)
+                            if pos is not None:
+                                pos["allocated"] = max(0, pos["allocated"] - qty_alloc)
+                            line["quantity_allocated"] = 0
+
                         # Remove from backordered — treat as cancelled
                         line["quantity_backordered"] = 0
                         line["line_status"] = "cancelled"
@@ -371,8 +381,14 @@ def _run_allocation(
         warehouse_id = _warehouse_for_line(line)
         sku = line["sku"]
 
-        wh_inv = state.inventory.get(warehouse_id, {})
-        available = wh_inv.get(sku, 0)
+        pos = state.inventory.setdefault(warehouse_id, {}).get(sku)
+        if pos is None:
+            on_hand = 0
+            allocated_in_pos = 0
+        else:
+            on_hand = pos.get("on_hand", 0)
+            allocated_in_pos = pos.get("allocated", 0)
+        available = max(0, on_hand - allocated_in_pos)
 
         if available == 0:
             # No stock at all — backorder the full need
@@ -397,8 +413,11 @@ def _run_allocation(
             )
 
         elif available >= need:
-            # Full fill
-            state.inventory[warehouse_id][sku] = available - need
+            # Full fill: reserve units by incrementing allocated (on_hand unchanged)
+            if pos is None:
+                pos = {"on_hand": 0, "allocated": 0, "in_transit": 0}
+                state.inventory[warehouse_id][sku] = pos
+            pos["allocated"] += need
             line["quantity_allocated"] = line.get("quantity_allocated", 0) + need
             # If this line was previously backordered, clear the backorder qty
             line["quantity_backordered"] = 0
@@ -423,10 +442,13 @@ def _run_allocation(
             )
 
         else:
-            # Partial fill: allocate what's available, backorder the rest
+            # Partial fill: reserve what's available, backorder the rest
             remainder = need - available
 
-            state.inventory[warehouse_id][sku] = 0
+            if pos is None:
+                pos = {"on_hand": 0, "allocated": 0, "in_transit": 0}
+                state.inventory[warehouse_id][sku] = pos
+            pos["allocated"] += available
             line["quantity_allocated"] = line.get("quantity_allocated", 0) + available
             # Replace backordered qty with the new remainder
             line["quantity_backordered"] = remainder
@@ -532,15 +554,7 @@ def run(
     events.extend(_run_escalation(state, sim_date))
 
     # --- Pass 2: Allocate open lines ---
-    # Opt-D: Reuse the sorted order list when open_orders hasn't changed.
-    h = hash(frozenset(state.open_orders.keys()))
-    if h != state._orders_snapshot_hash:
-        allocatable = _collect_allocatable_lines(state)
-        # Cache sorted IDs only (allocatable rebuilds the full list with refs)
-        state._sorted_order_ids = [a["order_id"] for a in allocatable]
-        state._orders_snapshot_hash = h
-    else:
-        allocatable = _collect_allocatable_lines(state)
+    allocatable = _collect_allocatable_lines(state)
     events.extend(_run_allocation(state, sim_date, allocatable))
 
     return events

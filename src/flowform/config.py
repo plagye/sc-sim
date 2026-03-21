@@ -160,6 +160,17 @@ class DisruptionsConfig(BaseModel):
     enabled: bool = False
 
 
+class CatalogConfig(BaseModel):
+    max_unit_price_pln: Annotated[float, Field(gt=0.0)] = 25000.0
+
+
+class CreditLimitConfig(BaseModel):
+    enabled: bool = True
+    growth_min: Annotated[float, Field(ge=0.0, le=1.0)] = 0.05
+    growth_max: Annotated[float, Field(ge=0.0, le=1.0)] = 0.15
+    max_multiplier: Annotated[float, Field(ge=1.0)] = 3.0
+
+
 class Config(BaseModel):
     simulation: SimulationConfig
     company: CompanyConfig
@@ -172,6 +183,8 @@ class Config(BaseModel):
     schema_evolution: SchemaEvolutionConfig
     noise: NoiseConfig
     disruptions: DisruptionsConfig
+    catalog: CatalogConfig = CatalogConfig()
+    credit_limit: CreditLimitConfig = CreditLimitConfig()
 
 
 def load_config(path: Path | str = "config.yaml") -> Config:

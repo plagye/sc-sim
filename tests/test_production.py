@@ -1,4 +1,4 @@
-"""Tests for the production engine (Phase 2, Step 15)."""
+"""Tests for the production engine (Phase 2, Step 15 + Step 54)."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from flowform.config import load_config
 from flowform.engines.production import (
     ProductionCompletionEvent,
     ProductionReclassificationEvent,
+    _production_sku_weights,
     run,
 )
 from flowform.state import SimulationState
@@ -151,8 +152,8 @@ def test_inventory_updated(config, tmp_path: Path):
     """
     state = SimulationState.from_new(config, db_path=tmp_path / "sim_inv.db")
 
-    # Snapshot inventory before
-    inv_before = sum(state.inventory["W01"].values())
+    # Snapshot inventory before (sum of on_hand values)
+    inv_before = sum(pos["on_hand"] for pos in state.inventory["W01"].values())
 
     # Run until a day that has completions (guard against back-to-back stoppages)
     current = _BUSINESS_DAY
@@ -171,7 +172,7 @@ def test_inventory_updated(config, tmp_path: Path):
 
     assert got_completions, "Could not produce any completions in 40 business days"
 
-    inv_after = sum(state.inventory["W01"].values())
+    inv_after = sum(pos["on_hand"] for pos in state.inventory["W01"].values())
 
     # At least some Grade A or B units should have been added
     assert inv_after >= inv_before, (
@@ -354,4 +355,257 @@ def test_reproducible(config, tmp_path: Path):
     assert dump_a == dump_b, (
         "Production events differed between two states with identical seeds. "
         "Randomness is not flowing deterministically through state.rng."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step 54: Demand-weighted production tests (Tests 11–20)
+# ---------------------------------------------------------------------------
+
+
+def test_weight_function_prefers_high_pressure_sku(config, tmp_path: Path):
+    """A starved SKU (on_hand=0, target=150) must get a higher weight than a
+    fully-stocked SKU (on_hand=200, target=150)."""
+    state = SimulationState.from_new(config, db_path=tmp_path / "sim_w1.db")
+
+    # Use only first two catalog entries
+    sku_starved = state.catalog[0].sku
+    sku_full = state.catalog[1].sku
+
+    # Set inventory so starved has 0 and full has 200
+    state.inventory["W01"][sku_starved] = {"on_hand": 0, "allocated": 0, "in_transit": 0}
+    state.inventory["W01"][sku_full] = {"on_hand": 200, "allocated": 0, "in_transit": 0}
+    state.inventory_target_stock[sku_starved] = 150
+    state.inventory_target_stock[sku_full] = 150
+
+    weights = _production_sku_weights(state, config)
+    idx_starved = next(i for i, e in enumerate(state.catalog) if e.sku == sku_starved)
+    idx_full = next(i for i, e in enumerate(state.catalog) if e.sku == sku_full)
+
+    assert weights[idx_starved] > weights[idx_full], (
+        f"Starved SKU weight {weights[idx_starved]:.4f} should exceed "
+        f"full SKU weight {weights[idx_full]:.4f}"
+    )
+
+
+def test_weight_function_skus_above_target_get_zero_stock_pressure(config, tmp_path: Path):
+    """A SKU with on_hand >= target_stock must have stock_pressure == 0."""
+    state = SimulationState.from_new(config, db_path=tmp_path / "sim_w2.db")
+    sku = state.catalog[0].sku
+
+    state.inventory["W01"][sku] = {"on_hand": 200, "allocated": 0, "in_transit": 0}
+    state.inventory_target_stock[sku] = 100  # on_hand > target
+
+    weights = _production_sku_weights(state, config)
+    idx = next(i for i, e in enumerate(state.catalog) if e.sku == sku)
+
+    # Stock pressure for this SKU must be 0; only days_since contributes.
+    # Since sim_day == 0 and SKU was never produced, days_since = 0 - 0 = 0.
+    # Both components are 0, so the weight is 0 (fallback uniform applies if ALL are 0).
+    # Assert weight <= pure days_since contribution (0.4 * 1.0 max).
+    assert weights[idx] <= 0.4 + 1e-9, (
+        f"SKU above target should have zero stock_pressure; weight={weights[idx]:.4f}"
+    )
+
+
+def test_weight_function_never_produced_sku_gets_max_days_since(config, tmp_path: Path):
+    """A SKU absent from last_produced gets days_since = sim_day (maximum urgency).
+
+    With sim_day > 0, its normalised days_since component should be the highest
+    among all SKUs that were produced at sim_day - 1 or earlier.
+    """
+    state = SimulationState.from_new(config, db_path=tmp_path / "sim_w3.db")
+    state.sim_day = 10  # advance sim_day without actually running days
+
+    sku_never = state.catalog[0].sku
+    sku_recent = state.catalog[1].sku
+
+    # Mark recent as produced today
+    state.last_produced[sku_recent] = 10
+    # sku_never is absent from last_produced → days_since = 10
+
+    # Both have identical stock pressure (default target = 150, on_hand = 0)
+    state.inventory["W01"][sku_never] = {"on_hand": 0, "allocated": 0, "in_transit": 0}
+    state.inventory["W01"][sku_recent] = {"on_hand": 0, "allocated": 0, "in_transit": 0}
+
+    weights = _production_sku_weights(state, config)
+    idx_never = next(i for i, e in enumerate(state.catalog) if e.sku == sku_never)
+    idx_recent = next(i for i, e in enumerate(state.catalog) if e.sku == sku_recent)
+
+    assert weights[idx_never] > weights[idx_recent], (
+        f"Never-produced SKU weight {weights[idx_never]:.4f} should exceed "
+        f"recently-produced SKU weight {weights[idx_recent]:.4f}"
+    )
+
+
+def test_weight_function_recently_produced_sku_gets_lower_weight_than_stale(config, tmp_path: Path):
+    """Two SKUs with equal stock_pressure: the stale one must have higher weight."""
+    state = SimulationState.from_new(config, db_path=tmp_path / "sim_w4.db")
+    state.sim_day = 20
+
+    sku_stale = state.catalog[0].sku
+    sku_fresh = state.catalog[1].sku
+
+    # Both at 0 inventory (equal stock pressure)
+    state.inventory["W01"][sku_stale] = {"on_hand": 0, "allocated": 0, "in_transit": 0}
+    state.inventory["W01"][sku_fresh] = {"on_hand": 0, "allocated": 0, "in_transit": 0}
+    state.inventory_target_stock[sku_stale] = 150
+    state.inventory_target_stock[sku_fresh] = 150
+
+    # Stale: never produced (days_since = 20); fresh: produced today (days_since = 0)
+    state.last_produced[sku_fresh] = 20  # produced this exact sim_day
+
+    weights = _production_sku_weights(state, config)
+    idx_stale = next(i for i, e in enumerate(state.catalog) if e.sku == sku_stale)
+    idx_fresh = next(i for i, e in enumerate(state.catalog) if e.sku == sku_fresh)
+
+    assert weights[idx_stale] > weights[idx_fresh], (
+        f"Stale weight {weights[idx_stale]:.4f} should exceed "
+        f"fresh weight {weights[idx_fresh]:.4f}"
+    )
+
+
+def test_weight_function_all_at_target_falls_back_to_uniform(config, tmp_path: Path):
+    """When all SKUs are at/above target AND produced this sim_day, weights should be uniform."""
+    state = SimulationState.from_new(config, db_path=tmp_path / "sim_w5.db")
+    state.sim_day = 5
+
+    # Set every catalog SKU: on_hand >= target, produced this day
+    for entry in state.catalog:
+        state.inventory["W01"][entry.sku] = {"on_hand": 200, "allocated": 0, "in_transit": 0}
+        state.inventory_target_stock[entry.sku] = 100
+        state.last_produced[entry.sku] = 5  # produced today
+
+    weights = _production_sku_weights(state, config)
+
+    # All weights should be equal (fallback uniform = 1.0)
+    assert all(w == weights[0] for w in weights), (
+        "Expected all weights equal when every SKU is above target and produced today"
+    )
+    assert weights[0] == 1.0, (
+        f"Fallback uniform should be 1.0, got {weights[0]}"
+    )
+
+
+def test_weight_function_deterministic(config, tmp_path: Path):
+    """Same state inputs must always produce the same weights list."""
+    state = SimulationState.from_new(config, db_path=tmp_path / "sim_w6.db")
+    state.sim_day = 7
+    # Set some non-trivial inventory
+    for i, entry in enumerate(state.catalog[:10]):
+        state.inventory["W01"][entry.sku] = {"on_hand": i * 15, "allocated": 0, "in_transit": 0}
+        state.inventory_target_stock[entry.sku] = 100
+
+    weights_1 = _production_sku_weights(state, config)
+    weights_2 = _production_sku_weights(state, config)
+
+    assert weights_1 == weights_2, "Weight function produced different results on identical state"
+
+
+def test_last_produced_updated_after_run(config, tmp_path: Path):
+    """After run() on a business day, state.last_produced must contain all
+    produced SKUs with value == state.sim_day."""
+    state = SimulationState.from_new(config, db_path=tmp_path / "sim_lp1.db")
+
+    from flowform.calendar import is_business_day as _is_biz
+
+    # Run until we get completions
+    current = _BUSINESS_DAY
+    for _ in range(30):
+        events = run(state, config, current)
+        completions = [e for e in events if isinstance(e, ProductionCompletionEvent)]
+        if completions:
+            produced_skus = {e.sku for e in completions}
+            for sku in produced_skus:
+                assert sku in state.last_produced, f"{sku} missing from last_produced"
+                assert state.last_produced[sku] == state.sim_day, (
+                    f"last_produced[{sku}]={state.last_produced[sku]} != sim_day={state.sim_day}"
+                )
+            return
+        current += timedelta(days=1)
+        while not _is_biz(current):
+            current += timedelta(days=1)
+
+    pytest.fail("Could not get any completions in 30 business days")
+
+
+def test_last_produced_roundtrips_sqlite(config, tmp_path: Path):
+    """state.last_produced must survive a save/reload cycle."""
+    db = tmp_path / "sim_lp2.db"
+    state = SimulationState.from_new(config, db_path=db)
+
+    # Manually write some entries
+    sku1 = state.catalog[0].sku
+    sku2 = state.catalog[1].sku
+    state.last_produced[sku1] = 5
+    state.last_produced[sku2] = 12
+    state.save()
+
+    # Reload
+    state2 = SimulationState.from_db(config, db_path=db)
+    assert state2.last_produced.get(sku1) == 5, "sku1 last_produced not persisted"
+    assert state2.last_produced.get(sku2) == 12, "sku2 last_produced not persisted"
+
+
+def test_inventory_target_stock_roundtrips_sqlite(config, tmp_path: Path):
+    """state.inventory_target_stock must survive a save/reload cycle."""
+    db = tmp_path / "sim_its.db"
+    state = SimulationState.from_new(config, db_path=db)
+
+    sku = state.catalog[3].sku
+    state.inventory_target_stock[sku] = 275
+    state.save()
+
+    state2 = SimulationState.from_db(config, db_path=db)
+    assert state2.inventory_target_stock.get(sku) == 275, (
+        "inventory_target_stock not persisted through SQLite"
+    )
+
+
+def test_popular_sku_produced_more_than_obscure_sku(config, tmp_path: Path):
+    """Integration: one chronically starved SKU (on_hand=0, target=150) vs
+    2499 SKUs consistently above target (on_hand=500, target=150).
+
+    After each production run we reset the starved SKU's inventory back to 0
+    so it remains perpetually below target throughout all 50 days.
+
+    Under demand-weighted selection the starved SKU must appear in completions
+    on at least 15 of 50 business days (>=30%).  Under uniform random it would
+    appear on ~2% of days on average.
+    """
+    from flowform.calendar import is_business_day as _is_biz
+
+    state = SimulationState.from_new(config, db_path=tmp_path / "sim_popular.db")
+
+    starved_sku = state.catalog[0].sku
+
+    # Set all SKUs to on_hand=500, target=150 (all above target → 0 stock pressure)
+    for entry in state.catalog:
+        state.inventory["W01"][entry.sku] = {"on_hand": 500, "allocated": 0, "in_transit": 0}
+        state.inventory_target_stock[entry.sku] = 150
+
+    # Starve only the first SKU — stock_pressure = 1.0
+    state.inventory["W01"][starved_sku] = {"on_hand": 0, "allocated": 0, "in_transit": 0}
+
+    days_with_starved = 0
+    current = _BUSINESS_DAY
+    biz_days_run = 0
+
+    while biz_days_run < 50:
+        events = run(state, config, current)
+        completions = [e for e in events if isinstance(e, ProductionCompletionEvent)]
+        if completions:
+            skus_today = {e.sku for e in completions}
+            if starved_sku in skus_today:
+                days_with_starved += 1
+            biz_days_run += 1
+        # Keep the starved SKU starved so stock_pressure stays at 1.0 every day.
+        state.inventory["W01"][starved_sku] = {"on_hand": 0, "allocated": 0, "in_transit": 0}
+        current += timedelta(days=1)
+        while not _is_biz(current):
+            current += timedelta(days=1)
+
+    assert days_with_starved >= 15, (
+        f"Starved SKU appeared on only {days_with_starved}/50 days — "
+        "demand-weighted selection not working (expected >=15)"
     )

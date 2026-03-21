@@ -18,6 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from flowform.adm._calibration import _expected_monthly_units_per_group
 from flowform.calendar import is_business_day, is_first_business_day_of_month
 from flowform.config import Config
 from flowform.state import SimulationState
@@ -113,6 +114,9 @@ def run(
     selected_groups: list[str] = rng.sample(all_sku_groups, n_groups)
     selected_groups.sort()  # deterministic ordering
 
+    # Compute calibrated baseline once — expected monthly units per sku_group
+    baseline = _expected_monthly_units_per_group(state, config)
+
     lines: list[ForecastLine] = []
 
     for sku_group in selected_groups:
@@ -126,7 +130,7 @@ def run(
                 target_year += 1
 
             monthly_mult = config.demand.base_monthly_multipliers[target_month]
-            base_qty = rng.randint(50, 500)
+            base_qty = round(baseline.get(sku_group, rng.randint(50, 500)))
 
             # Apply monthly multiplier then ±10–25% noise
             noise_pct = rng.uniform(0.10, 0.25) * rng.choice([-1, 1])

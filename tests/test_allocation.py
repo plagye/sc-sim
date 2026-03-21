@@ -171,8 +171,8 @@ def test_full_allocation_when_stock_sufficient(state, config):
     order_id = "ORD-2026-900003"
 
     # Set up inventory: 100 units on hand
-    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = 100
-    initial_inv = state.inventory[_WAREHOUSE][_SKU_A]
+    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = {"on_hand": 100, "allocated": 0, "in_transit": 0}
+    initial_inv = 100  # available = on_hand - allocated
 
     line = _make_line(order_id, 1, _SKU_A, 50)  # order 50 units
     order = _make_order(order_id, customer_id, lines=[line])
@@ -195,8 +195,10 @@ def test_full_allocation_when_stock_sufficient(state, config):
     assert pick.quantity_direction == "out"
     assert pick.warehouse_id == _WAREHOUSE
 
-    # Inventory must have decreased
-    assert state.inventory[_WAREHOUSE][_SKU_A] == initial_inv - 50
+    # Inventory available must have decreased (allocated increased, on_hand unchanged)
+    pos = state.inventory[_WAREHOUSE][_SKU_A]
+    available = pos["on_hand"] - pos["allocated"]
+    assert available == initial_inv - 50
 
     # Line status must be "allocated"
     updated_line = state.open_orders[order_id]["lines"][0]
@@ -222,7 +224,7 @@ def test_zero_stock_creates_backorder(state, config):
     order_id = "ORD-2026-900004"
 
     # Ensure zero inventory for this SKU
-    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_B] = 0
+    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_B] = {"on_hand": 0, "allocated": 0, "in_transit": 0}
 
     line = _make_line(order_id, 1, _SKU_B, 30)
     state.open_orders[order_id] = _make_order(order_id, customer_id, lines=[line])
@@ -240,8 +242,10 @@ def test_zero_stock_creates_backorder(state, config):
     assert bo.quantity_backordered == 30
     assert bo.quantity_allocated == 0
 
-    # Inventory unchanged
-    assert state.inventory[_WAREHOUSE].get(_SKU_B, 0) == 0
+    # Inventory available unchanged (still zero)
+    pos = state.inventory[_WAREHOUSE].get(_SKU_B)
+    available = (pos["on_hand"] - pos["allocated"]) if pos else 0
+    assert available == 0
 
     # Line status
     updated_line = state.open_orders[order_id]["lines"][0]
@@ -263,7 +267,7 @@ def test_partial_fill(state, config):
     order_id = "ORD-2026-900005"
 
     # Set 15 units available, order 40
-    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = 15
+    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = {"on_hand": 15, "allocated": 0, "in_transit": 0}
 
     line = _make_line(order_id, 1, _SKU_A, 40)
     state.open_orders[order_id] = _make_order(order_id, customer_id, lines=[line])
@@ -292,8 +296,9 @@ def test_partial_fill(state, config):
     assert bo.quantity_backordered == 25, f"Backorder qty should be 25 (40-15), got {bo.quantity_backordered}"
     assert bo.backorder_reason == "insufficient_stock"
 
-    # Inventory should now be 0
-    assert state.inventory[_WAREHOUSE][_SKU_A] == 0
+    # Available inventory should now be 0 (all 15 units reserved)
+    pos = state.inventory[_WAREHOUSE][_SKU_A]
+    assert pos["on_hand"] - pos["allocated"] == 0
 
     # Line status: partially_allocated
     updated_line = state.open_orders[order_id]["lines"][0]
@@ -316,7 +321,7 @@ def test_priority_ordering_critical_before_standard(state, config):
     sku = "FF-BA50-CS-PN16-FL-MN"
 
     # Only 30 units available — first-come first-serve would be wrong
-    state.inventory.setdefault(_WAREHOUSE, {})[sku] = 30
+    state.inventory.setdefault(_WAREHOUSE, {})[sku] = {"on_hand": 30, "allocated": 0, "in_transit": 0}
 
     # Standard order (registered first but lower priority)
     order_std_id = "ORD-2026-900006"
@@ -361,8 +366,10 @@ def test_priority_ordering_critical_before_standard(state, config):
         std_line["quantity_backordered"] > 0
     ), "Standard line should have backorder quantity"
 
-    # Total inventory used should not exceed 30
-    assert state.inventory[_WAREHOUSE].get(sku, 0) == 0, "Inventory should be depleted"
+    # Total available inventory should be depleted
+    pos = state.inventory[_WAREHOUSE].get(sku)
+    avail = (pos["on_hand"] - pos["allocated"]) if pos else 0
+    assert avail == 0, "Available inventory should be depleted"
 
     # Cleanup
     del state.open_orders[order_std_id]
@@ -381,7 +388,7 @@ def test_backorder_escalation_after_14_days(state, config):
     sku = "FF-GA15-SS304-PN16-FL-MN"
 
     # No stock — line will remain backordered
-    state.inventory.setdefault(_WAREHOUSE, {})[sku] = 0
+    state.inventory.setdefault(_WAREHOUSE, {})[sku] = {"on_hand": 0, "allocated": 0, "in_transit": 0}
 
     line = _make_line(
         order_id, 1, sku, 20,
@@ -428,7 +435,7 @@ def test_backorder_cancellation_after_30_days(state, config):
     order_id = "ORD-2026-900009"
     sku = "FF-BA25-SS304-PN16-FL-MN"
 
-    state.inventory.setdefault(_WAREHOUSE, {})[sku] = 0
+    state.inventory.setdefault(_WAREHOUSE, {})[sku] = {"on_hand": 0, "allocated": 0, "in_transit": 0}
 
     line = _make_line(
         order_id, 1, sku, 15,
@@ -512,8 +519,8 @@ def test_credit_hold_orders_skipped(state, config):
     order_id = "ORD-2026-900010"
     sku = "FF-GA40-CS-PN16-FL-MN"
 
-    state.inventory.setdefault(_WAREHOUSE, {})[sku] = 200
-    initial_inv = state.inventory[_WAREHOUSE][sku]
+    state.inventory.setdefault(_WAREHOUSE, {})[sku] = {"on_hand": 200, "allocated": 0, "in_transit": 0}
+    initial_avail = 200
 
     line = _make_line(order_id, 1, sku, 50)
     state.open_orders[order_id] = _make_order(
@@ -533,8 +540,9 @@ def test_credit_hold_orders_skipped(state, config):
         f"Expected no events for credit_hold order, got {order_events}"
     )
 
-    # Inventory unchanged
-    assert state.inventory[_WAREHOUSE][sku] == initial_inv
+    # Inventory available unchanged
+    pos = state.inventory[_WAREHOUSE][sku]
+    assert pos["on_hand"] - pos["allocated"] == initial_avail
 
     # Line unchanged
     assert state.open_orders[order_id]["lines"][0]["quantity_allocated"] == 0
@@ -554,8 +562,8 @@ def test_invariant_allocated_plus_backorder_never_exceeds_ordered(state, config)
 
     # Set limited stock for multiple SKUs
     skus = [_SKU_A, _SKU_B]
-    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = 7
-    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_B] = 0
+    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = {"on_hand": 7, "allocated": 0, "in_transit": 0}
+    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_B] = {"on_hand": 0, "allocated": 0, "in_transit": 0}
 
     orders_created: list[str] = []
     for i, sku in enumerate(skus):
@@ -598,8 +606,8 @@ def test_multiple_orders_multiple_lines_inventory_accounting(state, config):
     sku2 = "FF-BA100-CS-PN16-FL-MN"
 
     # Set known inventory
-    state.inventory.setdefault(_WAREHOUSE, {})[sku1] = 50
-    state.inventory.setdefault(_WAREHOUSE, {})[sku2] = 30
+    state.inventory.setdefault(_WAREHOUSE, {})[sku1] = {"on_hand": 50, "allocated": 0, "in_transit": 0}
+    state.inventory.setdefault(_WAREHOUSE, {})[sku2] = {"on_hand": 30, "allocated": 0, "in_transit": 0}
 
     # Two orders, each with two lines
     orders_created: list[str] = []
@@ -652,9 +660,11 @@ def test_multiple_orders_multiple_lines_inventory_accounting(state, config):
         f"Expected 30 units of {sku2} allocated, got {total_allocated_sku2}"
     )
 
-    # Inventory levels
-    assert state.inventory[_WAREHOUSE][sku1] == 10  # 50 - 40
-    assert state.inventory[_WAREHOUSE][sku2] == 0   # 30 - 30
+    # Available inventory levels (on_hand - allocated)
+    pos1 = state.inventory[_WAREHOUSE][sku1]
+    pos2 = state.inventory[_WAREHOUSE][sku2]
+    assert pos1["on_hand"] - pos1["allocated"] == 10  # 50 - 40
+    assert pos2["on_hand"] - pos2["allocated"] == 0   # 30 - 30
 
     # Cleanup
     for order_id in orders_created:
@@ -678,7 +688,7 @@ def test_backordered_line_retried_when_stock_arrives(state, config):
     sku = "FF-BA80-CS-PN16-FL-MN"
 
     # Day 1: zero stock → line becomes backordered
-    state.inventory.setdefault(_WAREHOUSE, {})[sku] = 0
+    state.inventory.setdefault(_WAREHOUSE, {})[sku] = {"on_hand": 0, "allocated": 0, "in_transit": 0}
     line = _make_line(order_id, 1, sku, 10)
     state.open_orders[order_id] = _make_order(order_id, customer_id, lines=[line])
 
@@ -692,7 +702,7 @@ def test_backordered_line_retried_when_stock_arrives(state, config):
     )
 
     # Day 2: stock arrives
-    state.inventory[_WAREHOUSE][sku] = 50
+    state.inventory[_WAREHOUSE][sku] = {"on_hand": 50, "allocated": 0, "in_transit": 0}
 
     day2 = date(2026, 1, 7)  # Wednesday (skip Jan 6 holiday)
     run(state, config, day2)
@@ -720,7 +730,7 @@ def test_state_allocated_populated_after_full_allocation(state, config):
     order_id = "ORD-2026-900016"
     qty = 25
 
-    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = 100
+    state.inventory.setdefault(_WAREHOUSE, {})[_SKU_A] = {"on_hand": 100, "allocated": 0, "in_transit": 0}
     line = _make_line(order_id, 1, _SKU_A, qty)
     state.open_orders[order_id] = _make_order(order_id, customer_id, lines=[line])
 
@@ -750,7 +760,7 @@ def test_backorder_days_increments_each_business_day(state, config):
     sku = "FF-GA15-CS-PN25-FL-MN"
 
     # No stock so line stays backordered
-    state.inventory.setdefault(_WAREHOUSE, {})[sku] = 0
+    state.inventory.setdefault(_WAREHOUSE, {})[sku] = {"on_hand": 0, "allocated": 0, "in_transit": 0}
 
     line = _make_line(
         order_id, 1, sku, 10,

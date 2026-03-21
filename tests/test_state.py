@@ -70,7 +70,7 @@ def test_round_trip_scalars_and_operational(config, db_path):
     # Mutate some operational state
     state.sim_day = 7
     state.current_date = config.simulation.start_date + timedelta(days=10)
-    state.inventory["W01"]["FF-BL50-CS-PN16-FMAN"] = 42
+    state.inventory["W01"]["FF-BL50-CS-PN16-FMAN"] = {"on_hand": 42, "allocated": 0, "in_transit": 0}
     state.allocated["W02"]["FF-BL50-CS-PN16-FMAN"] = 5
     state.customer_balances["CUST-0001"] = 12345.67
     state.exchange_rates["EUR"] = 4.35
@@ -84,7 +84,7 @@ def test_round_trip_scalars_and_operational(config, db_path):
     assert loaded.sim_day == 7
     assert loaded.current_date == state.current_date
     assert loaded.start_date == state.start_date
-    assert loaded.inventory["W01"]["FF-BL50-CS-PN16-FMAN"] == 42
+    assert loaded.inventory["W01"]["FF-BL50-CS-PN16-FMAN"] == {"on_hand": 42, "allocated": 0, "in_transit": 0}
     assert loaded.allocated["W02"]["FF-BL50-CS-PN16-FMAN"] == 5
     assert loaded.customer_balances["CUST-0001"] == pytest.approx(12345.67)
     assert loaded.exchange_rates["EUR"] == pytest.approx(4.35)
@@ -309,11 +309,12 @@ def test_catalog_weight_round_trip(config, db_path):
 def test_counters_roundtrip(config, db_path):
     state = SimulationState.from_new(config, db_path=db_path)
 
-    assert set(state.counters.keys()) == {"order", "batch", "shipment", "load", "return", "signal", "disruption"}
-    # All counters start at 1000 except signal and disruption which start at 0
+    assert set(state.counters.keys()) == {"order", "batch", "shipment", "load", "return", "signal", "disruption", "ship"}
+    # All counters start at 1000 except signal, disruption, ship which start at 0
     assert state.counters["signal"] == 0
     assert state.counters["disruption"] == 0
-    assert all(v == 1000 for k, v in state.counters.items() if k not in ("signal", "disruption"))
+    assert state.counters["ship"] == 0
+    assert all(v == 1000 for k, v in state.counters.items() if k not in ("signal", "disruption", "ship"))
 
     state.counters["order"] = 1042
     state.counters["load"] = 1007
@@ -406,11 +407,22 @@ def test_initial_inventory_seeded(config, db_path):
     assert stocked_fraction >= 0.50, f"Only {stocked_fraction:.1%} of SKUs stocked in W01"
 
     # Total units across W01 must be positive
-    assert sum(w01.values()) > 0
+    total_w01 = sum(pos["on_hand"] for pos in w01.values())
+    assert total_w01 > 0
 
     # All stocked SKUs must be valid catalog SKUs
     assert set(w01.keys()).issubset(catalog_skus)
     assert set(w02.keys()).issubset(catalog_skus)
 
     # W02 should be a fraction of W01 (not exceed it)
-    assert sum(w02.values()) < sum(w01.values())
+    total_w02 = sum(pos["on_hand"] for pos in w02.values())
+    assert total_w02 < total_w01
+
+    # All inventory positions must be the new dict format
+    for pos in w01.values():
+        assert isinstance(pos, dict)
+        assert "on_hand" in pos
+        assert "allocated" in pos
+        assert "in_transit" in pos
+        assert pos["allocated"] == 0
+        assert pos["in_transit"] == 0

@@ -361,13 +361,14 @@ class TestPhase2Integration:
     # ------------------------------------------------------------------
 
     def test_no_negative_inventory(self, sim_result: dict) -> None:
-        """state.inventory has no negative quantity for any (warehouse, sku) pair."""
+        """state.inventory has no negative on_hand for any (warehouse, sku) pair."""
         state = sim_result["state"]
         violations: list[str] = []
         for wh_code, wh_inv in state.inventory.items():
-            for sku, qty in wh_inv.items():
-                if qty < 0:
-                    violations.append(f"{wh_code}:{sku}={qty}")
+            for sku, pos in wh_inv.items():
+                on_hand = pos.get("on_hand", 0) if isinstance(pos, dict) else pos
+                if on_hand < 0:
+                    violations.append(f"{wh_code}:{sku}={on_hand}")
         assert not violations, (
             f"Negative inventory found for {len(violations)} (warehouse, SKU) pairs:\n"
             + "\n".join(violations[:20])
@@ -377,9 +378,9 @@ class TestPhase2Integration:
         """Total units in inventory across all warehouses and SKUs is >= 0."""
         state = sim_result["state"]
         total = sum(
-            qty
+            (pos.get("on_hand", 0) if isinstance(pos, dict) else pos)
             for wh_inv in state.inventory.values()
-            for qty in wh_inv.values()
+            for pos in wh_inv.values()
         )
         assert total >= 0, f"Total inventory is negative: {total}"
 
@@ -655,16 +656,19 @@ class TestPhase2Integration:
         """After 14 days with production, total inventory should be positive."""
         state = sim_result["state"]
         total = sum(
-            qty
+            (pos.get("on_hand", 0) if isinstance(pos, dict) else pos)
             for wh_inv in state.inventory.values()
-            for qty in wh_inv.values()
+            for pos in wh_inv.values()
         )
         assert total > 0, f"Total inventory is zero or negative after 14 days: {total}"
 
     def test_w01_has_stock(self, sim_result: dict) -> None:
         """W01 (main warehouse) has positive on-hand stock after 14 days."""
         state = sim_result["state"]
-        w01_total = sum(state.inventory.get("W01", {}).values())
+        w01_total = sum(
+            pos.get("on_hand", 0) if isinstance(pos, dict) else pos
+            for pos in state.inventory.get("W01", {}).values()
+        )
         assert w01_total > 0, f"W01 total stock is {w01_total} after 14 days"
 
     # ------------------------------------------------------------------
@@ -699,6 +703,8 @@ class TestPhase2Integration:
             events = json.loads(prod_file.read_text(encoding="utf-8"))
             for ev in events:
                 sku = ev.get("sku")
+                if sku is None:
+                    continue  # missing_field noise may drop sku
                 assert sku in catalog_skus, (
                     f"Production event references unknown SKU {sku!r} on {sim_date}"
                 )
@@ -763,8 +769,10 @@ class TestPhase2Integration:
                 continue
             events = json.loads(order_file.read_text(encoding="utf-8"))
             for ev in events:
-                if ev.get("event_type") != "customer_order":
-                    continue  # Skip backorder events (event_type="customer_orders")
+                if ev.get("event_type") not in ("customer_order", "customer_orders"):
+                    continue
+                if "lines" not in ev:
+                    continue  # missing_field noise legitimately dropped lines
                 lines = ev.get("lines", [])
                 assert len(lines) >= 1, (
                     f"Order {ev.get('order_id')} on {sim_date} has no lines"

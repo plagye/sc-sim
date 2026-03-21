@@ -4,14 +4,12 @@ Fires one InventorySnapshotEvent per warehouse at 23:59:00Z on every business
 day.  Each event contains a full list of positions (one per SKU with positive
 on-hand stock), including:
 
-- quantity_on_hand  — physical units in the warehouse
-- quantity_allocated — units picked/reserved for open orders (not yet shipped)
-- quantity_available — on_hand minus allocated, clamped to >= 0
+- quantity_on_hand   — physical units in the warehouse (includes allocated)
+- quantity_allocated — units reserved for open orders (not yet shipped)
+- quantity_available — max(0, on_hand - allocated)
 
-Because the allocation engine reduces ``state.inventory`` at pick time,
-``state.inventory[wh][sku]`` already holds the *available* quantity.  To
-reconstruct ``on_hand`` we add back units that are allocated-but-not-shipped
-from open orders.
+Reads directly from ``state.inventory[wh][sku]`` which now stores a dict with
+``on_hand``, ``allocated``, and ``in_transit`` fields.
 """
 
 from __future__ import annotations
@@ -57,7 +55,7 @@ def _build_allocated_by_sku(
     """Return per-SKU units allocated-but-not-shipped for *warehouse_code*.
 
     When the allocation engine picks units it:
-    1. Decrements ``state.inventory[wh][sku]``.
+    1. Increments ``pos["allocated"]`` in ``state.inventory[wh][sku]``.
     2. Increments ``line["quantity_allocated"]``.
 
     Units remain "allocated" until ``line["quantity_shipped"]`` catches up
@@ -123,16 +121,12 @@ def run(
         wh_code = warehouse.code
         wh_inventory = state.inventory.get(wh_code, {})
 
-        # Compute per-SKU allocated-but-not-shipped from open orders
-        allocated_by_sku = _build_allocated_by_sku(state.open_orders, wh_code)
-
         positions: list[InventoryPosition] = []
-        for sku, available_qty in wh_inventory.items():
-            qty_allocated = allocated_by_sku.get(sku, 0)
-            # on_hand = available (state.inventory) + allocated-but-not-shipped
-            qty_on_hand = available_qty + qty_allocated
+        for sku, pos in wh_inventory.items():
+            qty_on_hand = pos.get("on_hand", 0)
             if qty_on_hand <= 0:
                 continue
+            qty_allocated = pos.get("allocated", 0)
             qty_available = max(0, qty_on_hand - qty_allocated)
             positions.append(
                 InventoryPosition(

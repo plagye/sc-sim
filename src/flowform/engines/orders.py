@@ -323,7 +323,7 @@ def run(
         # Build line items
         lines: list[dict[str, Any]] = []
         for i, (entry, qty) in enumerate(zip(selected_entries, quantities)):
-            pln_price = pricing.base_price_pln(entry.spec)
+            pln_price = pricing.base_price_pln(entry.spec, config.catalog.max_unit_price_pln)
             discounted = pricing.apply_customer_discount(
                 pln_price, customer.contract_discount_pct
             )

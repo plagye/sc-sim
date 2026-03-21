@@ -72,7 +72,7 @@ ACTUATION_PRICE_MULT: Final[dict[str, float]] = {
 # ---------------------------------------------------------------------------
 
 
-def base_price_pln(spec: SKUSpec) -> float:
+def base_price_pln(spec: SKUSpec, max_price: float | None = None) -> float:
     """Return the base unit price in PLN for a given SKU spec.
 
     Price is computed multiplicatively from DN base price, valve type,
@@ -81,6 +81,10 @@ def base_price_pln(spec: SKUSpec) -> float:
 
     Args:
         spec: A valid SKUSpec instance from the product catalog.
+        max_price: Optional soft cap in PLN. When provided, the computed price
+            is clamped to ``min(price, max_price)`` before rounding. Pass
+            ``config.catalog.max_unit_price_pln`` at call sites to apply the
+            configured cap.
 
     Returns:
         Unit price in PLN rounded to 2 decimal places.
@@ -96,6 +100,8 @@ def base_price_pln(spec: SKUSpec) -> float:
         * CONNECTION_PRICE_MULT[spec.connection]
         * ACTUATION_PRICE_MULT[spec.actuation]
     )
+    if max_price is not None:
+        price = min(price, max_price)
     return round(price, 2)
 
 

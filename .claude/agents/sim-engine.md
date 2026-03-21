@@ -107,6 +107,28 @@ Never use `-v`. Quiet mode prints only failures + a one-line summary. With 500+ 
 48. Performance profiling + optimization
 49. README + usage documentation
 
+### Phase 6: Long-run Stability (Steps 50–52) — **complete**
+50. ShipmentConfirmationEvent — one SHIP-YYYYMMDD-NNNN per delivered order; lines with line_id/sku/qty_shipped/unit_price; total_value_pln; noise-exempt
+51. Credit limit growth — quarterly review grows limits 5–15% for low-utilisation customers; 3× initial cap; sim_day < 90 guard
+52. --continuous CLI flag — SIGINT/SIGTERM shutdown; --sleep N; per-day status line; incompatible with --reset/--until/--status
+
+### Phase 7: Fulfillment Pipeline Fix (Steps 53–55) — planned
+53. Fulfillment diagnostic script — `scripts/fulfillment_audit.py` (read-only); per-SKU demand/production frequency, inventory trajectory, order age buckets; outputs `docs/fulfillment_audit.md`
+54. Demand-weighted production — `_production_sku_weights()` blending days-since-produced + stock-pressure ratio; `state.last_produced` persisted in kv_state; RNG call count unchanged
+55. Fulfillment validation — 90-day integration run; fill rate > 60%, no SKU at zero >20 consecutive days, backorders < 30%
+
+### Phase 8: Financial Calibration (Steps 56–58) — planned
+56. Pricing soft cap — `max_unit_price_pln = 25000.0` in `CatalogConfig`; `min(calculated, cap)` in `base_price_pln()`
+57. ADM quantity calibration — `adm/_calibration.py` derives baseline from actual expected order volume per product group
+58. Payment scheduling — explicit `payment_due_date` at invoice time; `state.scheduled_payments` replaces daily Bernoulli
+
+### Phase 9: Inventory Integrity (Steps 59–60) — planned
+59. Four-way inventory position — `state.inventory[wh][sku]` refactored to `{"on_hand", "allocated", "in_transit"}`; backward-compatible SQLite migration
+60. Long-run stability gate — 18-month run; fill rate, hold rate, collection rate, allocation invariant all validated
+
+### Current Focus
+Starting Phase 7 (Step 53). Read `## Known Issues` in CLAUDE.md before any Phase 7–9 work — the five issues there define exactly what each phase fixes and why.
+
 ## Reference: Business Rules
 
 ### Product Catalog Constraints
